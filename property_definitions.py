@@ -26,9 +26,23 @@ def get_rb_id_names(self, context):
     return enum_items
 
 
+def get_property_object(prop_group, context=None):
+    obj = getattr(prop_group, "id_data", None)
+    if isinstance(obj, bpy.types.Object):
+        return obj
+    obj_name = getattr(prop_group, "obj_name", "")
+    if obj_name and obj_name in bpy.data.objects:
+        return bpy.data.objects[obj_name]
+    if context and getattr(context, "active_object", None):
+        return context.active_object
+    return None
+
+
 def update_rb_list(self, context):
     m_id = self.rigid_bodies
-    current_obj = bpy.data.objects[self.obj_name]
+    current_obj = get_property_object(self, context)
+    if not current_obj:
+        return
     b_obj_id = current_obj.id_data.session_uid
     existing_conn = ConnectOperator.connection_setup
 
@@ -39,16 +53,15 @@ def update_rb_list(self, context):
         else:
             existing_conn.assets_blender["rigid_body"] = {}
             existing_conn.assets_blender["rigid_body"][m_id] = {"b_ID": b_obj_id}
-        # existing_conn.rev_assets_blender[b_obj_id] = {'obj': current_obj, 'm_ID': m_id, \
-        #                                                      'asset_type': 'rigid_body'}
-        existing_conn.rev_assets_blender[b_obj_id]["m_ID"] = m_id
+        if b_obj_id in existing_conn.rev_assets_blender:
+            existing_conn.rev_assets_blender[b_obj_id]["m_ID"] = m_id
     else:
-        rev_m_id = existing_conn.rev_assets_blender[b_obj_id]["m_ID"]
-        if rev_m_id != "None":
-            del existing_conn.assets_blender["rigid_body"][rev_m_id]
+        if b_obj_id in existing_conn.rev_assets_blender:
+            rev_m_id = existing_conn.rev_assets_blender[b_obj_id]["m_ID"]
+            if rev_m_id != "None" and "rigid_body" in existing_conn.assets_blender:
+                if rev_m_id in existing_conn.assets_blender["rigid_body"]:
+                    del existing_conn.assets_blender["rigid_body"][rev_m_id]
             existing_conn.rev_assets_blender[b_obj_id]["m_ID"] = "None"
-    # print("assets_blender: ", existing_conn.assets_blender)
-    # print("rev_assets_blender: ", existing_conn.rev_assets_blender)
 
 
 def get_skeleton_id_names(self, context):
@@ -67,8 +80,9 @@ def get_skeleton_id_names(self, context):
 
 def update_skeleton_list(self, context):
     m_id = self.skeletons
-    current_obj = bpy.data.objects[self.obj_name]
-    SkeletonRepository.update_render_object(skeleton_id=m_id, object=current_obj)
+    current_obj = get_property_object(self, context)
+    if current_obj:
+        SkeletonRepository.update_render_object(skeleton_id=m_id, object=current_obj)
 
 
 def create_ble_ske_mapping(m_id, b_id, m_data_dict, b_obj):

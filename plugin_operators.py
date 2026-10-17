@@ -215,21 +215,30 @@ class ConnectionSetup:
                 value = (b_id, pos1, rot1, frame_num, "rigid_body", None)
                 values.append(value)
 
-        for skeleton_id, frame_data in data_dict["ske_data"].items():
+        for skeleton_id, frame_data in data_dict.get("ske_data", {}).items():
             skeleton_data = SkeletonRepository.get_by_id(skeleton_id=skeleton_id)
-            frame_data = skeleton_data.create_frame_data(data=frame_data)
-            values.append(
-                (skeleton_id, skeleton_data, None, frame_num, "skeleton", frame_data)
-            )
+            if skeleton_data is None:
+                continue
+            try:
+                frame_data = skeleton_data.create_frame_data(data=frame_data)
+                values.append(
+                    (skeleton_id, skeleton_data, None, frame_num, "skeleton", frame_data)
+                )
+            except Exception as e:
+                pass
 
         self.l.acquire()
         try:
             self.q.put(values)
         finally:
             self.l.release()
-            bpy.app.timers.register(
-                self.update_object_loc, first_interval=1 / 120
-            )  # freq = 120 Hz
+            try:
+                if not bpy.app.timers.is_registered(self.update_object_loc):
+                    bpy.app.timers.register(
+                        self.update_object_loc, first_interval=1 / 120
+                    )  # freq = 120 Hz
+            except Exception:
+                pass
 
     def update_object_loc(self):
         self.l.acquire()

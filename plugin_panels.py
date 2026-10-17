@@ -4,6 +4,7 @@ import bpy
 from bpy.types import Panel
 
 from . import plugin_operators
+from .core import animation_lists
 from .icon_viewer import IconsLoader
 from .plugin_operators import ConnectOperator
 from .plugin_skeletons import MotiveArmatureOperator
@@ -213,38 +214,101 @@ class AssignObjects(Panel):
 
     def draw(self, context):
         layout = self.layout
+        obj = context.active_object or context.object
 
-        row = layout.row(align=True)
-        row.label(text="Assign Motive to Blender Asset:", icon="ARROW_LEFTRIGHT")
+        if not obj:
+            row = layout.row(align=True)
+            row.label(text="Select an object.")
+            return
 
-        layout.use_property_split = True
+        layout.use_property_split = False
 
         existing_conn = plugin_operators.ConnectOperator.connection_setup
-        # bad_obj_types = ['CAMERA', 'LIGHT']
         if existing_conn.streaming_client:
-            # existing_conn.get_rigid_body_dict(context)
             existing_conn.get_desc_dict(context)
-            # for obj in bpy.data.objects:
-            # if obj.type not in bad_obj_types:
-            if bpy.context.active_object.select_get():  # ==
-                obj = bpy.context.active_object
-                objprop = obj.obj_prop
+
+        objprop = getattr(obj, "obj_prop", None)
+
+        if obj.type in ["MESH", "EMPTY", "CAMERA"]:
+            row = layout.row(align=True)
+            row.label(text="Attach to Rigid Body:", icon="SNAP_INCREMENT")
+
+            if objprop and existing_conn.streaming_client:
                 row = layout.row(align=True)
-                obj_name = obj.name
-
-                if obj.type in ["MESH", "EMPTY", "CAMERA"]:
-                    row.prop(objprop, "rigid_bodies", text=obj_name)
-
-                if obj.type == "ARMATURE":
-                    row.prop(objprop, "skeletons", text=obj_name)
-
+                row.prop(objprop, "rigid_bodies", text=obj.name)
             else:
                 row = layout.row(align=True)
-                row.label(text="Select an object.")
+                row.label(text="Start the connection first.", icon="INFO")
 
-        else:
+        elif obj.type == "ARMATURE":
             row = layout.row(align=True)
-            row.label(text="Start the connection.")
+            row.label(text="Attach to Motive Skeleton:", icon="OUTLINER_OB_ARMATURE")
+
+            if objprop and existing_conn.streaming_client:
+                row = layout.row(align=True)
+                row.prop(objprop, "skeletons", text="")
+            else:
+                row = layout.row(align=True)
+                row.label(text="Start Motive connection to stream.", icon="INFO")
+
+            # Realtime Retargeter Setup (Rokoko Style)
+            self.draw_actor_retarget(layout, obj)
+
+    @staticmethod
+    def draw_actor_retarget(layout, obj):
+        layout.separator()
+
+        split = layout.row(align=True)
+        row = split.split(factor=0.16, align=True)
+        row.label(text="Bones:")
+        row.operator("motive.detect_actor_bones", text="Auto Detect")
+        row.operator("motive.init_tpose", text="Set as T-Pose")
+        row.operator("motive.reset_tpose", text="Reset to T-Pose")
+
+        custom_data = obj.get("CUSTOM")
+        has_tpose = custom_data and (
+            custom_data.get("motive_tpose_bones") or custom_data.get("rsl_tpose_bones")
+        )
+        if not has_tpose:
+            row = layout.row(align=True)
+            row.label(text="T-Pose is not set yet!", icon="ERROR")
+
+        draw_custom_naming_schemes(layout)
+
+        col = layout.column()
+        for actor_bone in animation_lists.get_bones().keys():
+            split = col.row(align=True)
+            row = split.split(factor=0.32, align=True)
+            row.label(text=actor_bone + ":")
+            row.prop_search(obj, "motive_actor_" + actor_bone, obj.pose, "bones", text="")
+
+            if actor_bone == "rightToe":
+                col.separator()
+                row = col.row(align=True)
+                row.label(text="Gloves:", icon="VIEW_PAN")
+
+            if actor_bone == "leftLittleDistal":
+                col.separator()
+
+
+def draw_custom_naming_schemes(layout):
+    layout.separator()
+
+    row = layout.row(align=True)
+    row.label(text="Custom Naming Schemes:")
+    row.operator("motive.save_custom_bones", text="Save Current Naming Scheme")
+
+    subrow = layout.row(align=True)
+    row = subrow.row(align=True)
+    row.scale_y = 0.9
+    row.operator("motive.import_custom_schemes", text="Import")
+    row.operator("motive.export_custom_schemes", text="Export")
+    row = subrow.row(align=True)
+    row.scale_y = 0.9
+    row.alignment = "RIGHT"
+    row.operator("motive.clear_custom_bones", text="", icon="X")
+
+    layout.separator()
 
 
 class AllocatedObjects(Panel):

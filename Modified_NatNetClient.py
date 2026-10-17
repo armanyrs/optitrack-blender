@@ -2084,28 +2084,26 @@ class NatNetClient:
                 desc_dict["ske_desc"][skeleton.id_num]["rb_id"] = {}
                 desc_dict["ske_desc"][skeleton.id_num]["rb_name"] = {}
                 for rigid_body in skeleton.rigid_body_description_list:
+                    raw_bone_name = DataDescriptions.get_as_string(rigid_body.sz_name)
+                    if raw_bone_name.startswith(skeleton_name) and len(raw_bone_name) > ske_name_len:
+                        bone_name = raw_bone_name[ske_name_len:].lstrip("_: ")
+                    else:
+                        bone_name = raw_bone_name
+
                     desc_dict["ske_desc"][skeleton.id_num]["rb_id"][
                         rigid_body.id_num
                     ] = {
-                        "name": DataDescriptions.get_as_string(rigid_body.sz_name)[
-                            ske_name_len + 1 :
-                        ],
+                        "name": bone_name,
                         "pos": rigid_body.pos,
                         "parent_id": rigid_body.parent_id,
                     }
                     desc_dict["ske_desc"][skeleton.id_num]["rb_name"][
-                        DataDescriptions.get_as_string(rigid_body.sz_name)[
-                            ske_name_len + 1 :
-                        ]
+                        bone_name
                     ] = {
                         "id": rigid_body.id_num,
                         "pos": rigid_body.pos,
                         "parent_id": rigid_body.parent_id,
                     }
-
-                    bone_name = DataDescriptions.get_as_string(rigid_body.sz_name)[
-                        ske_name_len + 1 :
-                    ]
 
                     parent_bone_data = skeleton_bones.get(
                         rigid_body.parent_id, skeleton_bones[0]

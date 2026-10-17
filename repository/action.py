@@ -147,6 +147,8 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
         object: Object,
         frame_num: int,
     ):
+        if object not in cls.fcurves:
+            cls.cache_fcurves([object])
         pose_bone_to_fcurves = cls.fcurves[object]
 
         for pose_bone in (
