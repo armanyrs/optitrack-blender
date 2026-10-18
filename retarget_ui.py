@@ -105,6 +105,7 @@ class VIEW3D_PT_motive_retarget(Panel):
 
         row = layout.row(align=True)
         row.operator("motive.add_bone_list_item", text="Add Custom Entry", icon="ADD")
+        row.operator("motive.remove_bone_list_item", text="Remove Selected", icon="REMOVE")
 
         row = layout.row(align=True)
         row.prop(context.scene, "motive_retargeting_auto_scaling")

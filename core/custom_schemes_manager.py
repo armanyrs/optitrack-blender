@@ -83,25 +83,20 @@ def save_retargeting_to_list():
     save_to_file_and_update()
 
 
-def save_live_data_bone_to_list(bone_key, bone_name, bone_name_previous):
+def save_live_data_bone_to_list(bone_key, bone_name, bone_name_previous=None):
     if not detection_manager.bone_detection_list_custom.get(bone_key):
         detection_manager.bone_detection_list_custom[bone_key] = []
 
-    if bone_name_previous.lower() in detection_manager.bone_detection_list_custom[bone_key]:
-        detection_manager.bone_detection_list_custom[bone_key].remove(bone_name_previous.lower())
+    if bone_name_previous:
+        prev_clean = bone_name_previous.lower()
+        if prev_clean in [b.lower() for b in detection_manager.bone_detection_list_custom[bone_key]]:
+            detection_manager.bone_detection_list_custom[bone_key] = [
+                b for b in detection_manager.bone_detection_list_custom[bone_key] if b.lower() != prev_clean
+            ]
 
-        detection_manager.bone_detection_list = detection_manager.combine_lists(
-            detection_manager.bone_detection_list_unmodified,
-            detection_manager.bone_detection_list_custom,
-        )
-
-        bone_name_detected_new = detection_manager.detect_bone(bpy.context.active_object, bone_key)
-        if bone_name_detected_new == bone_name:
-            return
-
-    detection_manager.bone_detection_list_custom[bone_key] = [
-        bone_name
-    ] + detection_manager.bone_detection_list_custom[bone_key]
+    clean_name = bone_name.lower()
+    if clean_name not in [b.lower() for b in detection_manager.bone_detection_list_custom[bone_key]]:
+        detection_manager.bone_detection_list_custom[bone_key].insert(0, clean_name)
 
 
 def save_to_file_and_update():
@@ -112,8 +107,9 @@ def save_to_file_and_update():
 def save_custom_to_file(file_path=custom_bone_list_file):
     new_custom_list = clean_custom_list()
 
-    if not os.path.isdir(custom_bones_dir):
-        os.makedirs(custom_bones_dir, exist_ok=True)
+    target_dir = os.path.dirname(file_path)
+    if target_dir and not os.path.isdir(target_dir):
+        os.makedirs(target_dir, exist_ok=True)
 
     with open(file_path, "w", encoding="utf8") as outfile:
         json.dump(new_custom_list, outfile, ensure_ascii=False, indent=4)
@@ -129,8 +125,12 @@ def load_custom_lists_from_file(file_path=custom_bone_list_file):
     except json.decoder.JSONDecodeError:
         print("[Motive Retarget] Custom bone list is not a valid json file!")
 
+    has_valid_header = (
+        custom_bone_list.get("motive_custom_names") is not None
+        or custom_bone_list.get("rokoko_custom_names") is not None
+    )
     if (
-        custom_bone_list.get("rokoko_custom_names") is None
+        not has_valid_header
         or custom_bone_list.get("version") is None
         or custom_bone_list.get("bones") is None
     ):
@@ -141,6 +141,7 @@ def load_custom_lists_from_file(file_path=custom_bone_list_file):
 
 def clean_custom_list():
     new_custom_list = {
+        "motive_custom_names": True,
         "rokoko_custom_names": True,
         "version": 1,
         "bones": {},

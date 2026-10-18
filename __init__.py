@@ -81,6 +81,7 @@ def register():
         # Offline Retargeting Operators (FBX/BVH Baking)
         retarget_operators.MOTIVE_OT_build_bone_list,
         retarget_operators.MOTIVE_OT_add_bone_list_item,
+        retarget_operators.MOTIVE_OT_remove_bone_list_item,
         retarget_operators.MOTIVE_OT_clear_bone_list,
         retarget_operators.MOTIVE_OT_retarget_animation,
         # Realtime Retargeting Operators (Object Properties & Schemes)

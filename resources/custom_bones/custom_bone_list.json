@@ -1,6 +1,12 @@
 {
+    "motive_custom_names": true,
     "rokoko_custom_names": true,
     "version": 1,
-    "bones": {},
+    "bones": {
+        "custom_bone_pol_hips.001": [
+            "pol_hips.001",
+            "mixamorig:hips"
+        ]
+    },
     "shapes": {}
 }

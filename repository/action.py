@@ -99,10 +99,25 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
 
             fcurves = cls.get_fcurves(object=object)
 
+            assigned_hip = getattr(object, "motive_actor_hip", "")
+
             pose_bone_to_fcurves: dict[PoseBone, dict[FCurveIndexEnum, FCurve]] = {}
             for pose_bone in object.pose.bones:
                 pose_bone_fcurves: dict[FCurveIndexEnum, FCurve] = {}
-                if pose_bone.parent is not None and pose_bone.parent.parent is None:
+
+                # Determine if this bone should record location:
+                # 1. Matches the assigned hip bone (custom/Mixamo rigs)
+                # 2. Native Motive rig: child of root bone (bone 1)
+                # 3. Fallback: bone with no parent (root bone)
+                is_loc_bone = False
+                if assigned_hip:
+                    is_loc_bone = (pose_bone.name == assigned_hip)
+                else:
+                    is_loc_bone = (pose_bone.parent is None) or (
+                        pose_bone.parent is not None and pose_bone.parent.parent is None
+                    )
+
+                if is_loc_bone:
                     data_path = f'pose.bones["{pose_bone.name}"].location'
                     for fcurve_index_enum in [
                         FCurveIndexEnum.LOCATION_X,
@@ -120,6 +135,8 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
                                 index=index,
                             )
                         pose_bone_fcurves[fcurve_index_enum] = fcurve
+
+                # Rotation quaternion for all animated bones (including root/hips)
                 data_path = f'pose.bones["{pose_bone.name}"].rotation_quaternion'
                 for fcurve_index_enum in [
                     FCurveIndexEnum.QUATERNION_ROTATION_W,
@@ -138,6 +155,7 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
                             index=index,
                         )
                     pose_bone_fcurves[fcurve_index_enum] = fcurve
+
                 pose_bone_to_fcurves[pose_bone] = pose_bone_fcurves
             cls.fcurves[object] = pose_bone_to_fcurves
 
@@ -151,35 +169,14 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
             cls.cache_fcurves([object])
         pose_bone_to_fcurves = cls.fcurves[object]
 
-        for pose_bone in (
-            pose_bone for pose_bone in object.pose.bones if pose_bone.parent is not None
-        ):
-            fcurves = pose_bone_to_fcurves[pose_bone]
-            if pose_bone.parent.parent is None:
-                fcurve_indexes = (
-                    FCurveIndexEnum.QUATERNION_ROTATION_W,
-                    FCurveIndexEnum.QUATERNION_ROTATION_X,
-                    FCurveIndexEnum.QUATERNION_ROTATION_Y,
-                    FCurveIndexEnum.QUATERNION_ROTATION_Z,
-                    FCurveIndexEnum.LOCATION_X,
-                    FCurveIndexEnum.LOCATION_Y,
-                    FCurveIndexEnum.LOCATION_Z,
-                )
-            else:
-                fcurve_indexes = (
-                    FCurveIndexEnum.QUATERNION_ROTATION_W,
-                    FCurveIndexEnum.QUATERNION_ROTATION_X,
-                    FCurveIndexEnum.QUATERNION_ROTATION_Y,
-                    FCurveIndexEnum.QUATERNION_ROTATION_Z,
-                )
-            for fcurve_index in fcurve_indexes:
-                fcurve = fcurves[fcurve_index]
+        for pose_bone, fcurves in pose_bone_to_fcurves.items():
+            for fcurve_index, fcurve in fcurves.items():
                 value = fcurve_index.get_keyframe_value(pose_bone)
                 fcurve.keyframe_points.insert(
                     frame=frame_num,
                     value=value,
                     options={"FAST"},
-                ),
+                )
 
 
 class ActionRepositoryWithSlot(ActionRepositoryBase):

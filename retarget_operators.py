@@ -79,6 +79,28 @@ class MOTIVE_OT_add_bone_list_item(Operator):
         return {"FINISHED"}
 
 
+class MOTIVE_OT_remove_bone_list_item(Operator):
+    """Removes the selected bone item from the retargeting list."""
+
+    bl_idname = "motive.remove_bone_list_item"
+    bl_label = "Remove Selected Entry"
+    bl_description = "Removes the selected bone pair from the retargeting list"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        bone_list = context.scene.motive_retargeting_bone_list
+        index = context.scene.motive_retargeting_bone_list_index
+
+        if 0 <= index < len(bone_list):
+            bone_list.remove(index)
+            context.scene.motive_retargeting_bone_list_index = max(0, min(index, len(bone_list) - 1))
+            self.report({"INFO"}, "Bone entry removed.")
+            return {"FINISHED"}
+
+        self.report({"WARNING"}, "No bone entry selected to remove.")
+        return {"CANCELLED"}
+
+
 class MOTIVE_OT_clear_bone_list(Operator):
     """Clears target bone assignments in the retargeting bone list."""
 
@@ -125,12 +147,12 @@ class MOTIVE_OT_retarget_animation(Operator):
         # Build retargeting bone list
         self.retarget_bone_list = []
         for item in context.scene.motive_retargeting_bone_list:
-            if (
-                not item.bone_name_source
-                or not item.bone_name_target
-                or not armature_source.pose.bones.get(item.bone_name_source)
-                or not armature_target.pose.bones.get(item.bone_name_target)
-            ):
+            if not item.bone_name_source or not item.bone_name_target:
+                continue
+            source_is_obj = (item.bone_name_source == armature_source.name)
+            if not source_is_obj and not armature_source.pose.bones.get(item.bone_name_source):
+                continue
+            if not armature_target.pose.bones.get(item.bone_name_target):
                 continue
             self.retarget_bone_list.append(item)
 
@@ -190,29 +212,25 @@ class MOTIVE_OT_retarget_animation(Operator):
         armature_source_original = armature_source
         armature_source = self.copy_rest_pose(context, armature_source)
 
-        # Save transforms of target armature
+        # Save target transforms
         rotation_mode = armature_target.rotation_mode
-        armature_target.rotation_mode = "QUATERNION"
-        rotation = copy.deepcopy(armature_target.rotation_quaternion)
-        location = copy.deepcopy(armature_target.location)
 
-        # Apply transforms of target armature
-        bpy.ops.object.select_all(action="DESELECT")
-        utils.set_active(armature_target)
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-
-        bpy.ops.object.mode_set(mode="EDIT")
+        # Calculate target bone rest transforms relative to source armature without transform_apply
         bone_transforms = {}
-        for bone in context.object.data.edit_bones:
-            bone.select = False
-            head_loc = armature_source.matrix_world.inverted() @ bone.head.copy()
-            tail_loc = armature_source.matrix_world.inverted() @ bone.tail.copy()
+        for item in self.retarget_bone_list:
+            bone = armature_target.data.bones.get(item.bone_name_target)
+            if not bone:
+                continue
+            head_world = armature_target.matrix_world @ bone.head_local
+            tail_world = armature_target.matrix_world @ bone.tail_local
+            head_loc = armature_source.matrix_world.inverted() @ head_world
+            tail_loc = armature_source.matrix_world.inverted() @ tail_world
+            mat_world = armature_target.matrix_world.to_3x3() @ bone.matrix_local.to_3x3()
             roll = utils.mat3_to_vec_roll(
-                armature_source.matrix_world.inverted().to_3x3() @ bone.matrix.to_3x3()
+                armature_source.matrix_world.inverted().to_3x3() @ mat_world
             )
-            bone_transforms[bone.name] = (head_loc, tail_loc, roll)
+            bone_transforms[item.bone_name_target] = (head_loc, tail_loc, roll)
 
-        bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
         utils.set_active(armature_source)
         bpy.ops.object.mode_set(mode="EDIT")
@@ -222,10 +240,21 @@ class MOTIVE_OT_retarget_animation(Operator):
             bone_source = armature_source.data.edit_bones.get(item.bone_name_source)
             bone_new = armature_source.data.edit_bones.new(item.bone_name_target + RETARGET_ID)
             bone_new.head, bone_new.tail, bone_new.roll = bone_transforms[item.bone_name_target]
-            bone_new.parent = bone_source
+            if bone_source:
+                bone_new.parent = bone_source
+            else:
+                bone_new.parent = None
 
         bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
+
+        # Constraints inside duplicate helper for bones whose source is the root object
+        for item in self.retarget_bone_list:
+            if item.bone_name_source == armature_source_original.name:
+                pb = armature_source.pose.bones.get(item.bone_name_target + RETARGET_ID)
+                if pb:
+                    c = pb.constraints.new("COPY_ROTATION")
+                    c.target = armature_source_original
 
         # Add constraints to target armature
         for item in self.retarget_bone_list:
@@ -240,7 +269,7 @@ class MOTIVE_OT_retarget_animation(Operator):
                 constraint = bone_target.constraints.new("COPY_LOCATION")
                 constraint.name += RETARGET_ID
                 constraint.target = armature_source
-                constraint.subtarget = item.bone_name_source
+                constraint.subtarget = item.bone_name_target + RETARGET_ID
 
             armature_target.data.bones.get(item.bone_name_target).select = True
 
@@ -274,12 +303,6 @@ class MOTIVE_OT_retarget_animation(Operator):
         bpy.ops.object.select_all(action="DESELECT")
         utils.set_active(armature_target)
 
-        # Reset transforms
-        armature_target.rotation_quaternion = rotation
-        armature_target.location = location
-        armature_target.rotation_quaternion.w = -armature_target.rotation_quaternion.w
-        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-        armature_target.rotation_quaternion = rotation
         armature_target.rotation_mode = rotation_mode
 
         if source_scale:
@@ -304,7 +327,7 @@ class MOTIVE_OT_retarget_animation(Operator):
         return root_bones_animated
 
     def clean_animation(self, armature_source):
-        deletable_fcurves = ["location", "rotation_euler", "rotation_quaternion", "scale"]
+        deletable_fcurves = ["scale"]
         if not armature_source.animation_data or not armature_source.animation_data.action:
             return
         for fcurve in list(armature_source.animation_data.action.fcurves):
@@ -337,10 +360,16 @@ class MOTIVE_OT_retarget_animation(Operator):
         for item in self.retarget_bone_list:
             bone_source = armature_source.pose.bones.get(item.bone_name_source)
             bone_target = armature_target.pose.bones.get(item.bone_name_target)
-            if not bone_source or not bone_target:
+            if not bone_target:
                 continue
 
-            bone_source_z = (armature_source.matrix_world @ bone_source.head)[2]
+            if bone_source:
+                bone_source_z = (armature_source.matrix_world @ bone_source.head)[2]
+            elif item.bone_name_source == armature_source.name:
+                bone_source_z = armature_source.matrix_world.translation[2]
+            else:
+                continue
+
             bone_target_z = (armature_target.matrix_world @ bone_target.head)[2]
 
             if item.bone_name_target in root_bones:
@@ -659,23 +688,27 @@ class MOTIVE_OT_save_custom_bones(Operator):
     def execute(self, context):
         obj = context.object
         if not obj or obj.type != "ARMATURE":
+            self.report({"ERROR"}, "Please select an active armature object!")
             return {"CANCELLED"}
 
+        saved_count = 0
         for bone_name_key in animation_lists.get_bones().keys():
             bone_selected = getattr(obj, "motive_actor_" + bone_name_key, "")
             if not bone_selected:
                 continue
 
             bone_detected = detection_manager.detect_bone(obj, bone_name_key)
-            if bone_detected == bone_selected:
-                continue
-
             custom_schemes_manager.save_live_data_bone_to_list(
                 bone_name_key, bone_selected, bone_detected
             )
+            saved_count += 1
+
+        if saved_count == 0:
+            self.report({"WARNING"}, "No mapped bones found on active armature to save!")
+            return {"FINISHED"}
 
         custom_schemes_manager.save_to_file_and_update()
-        self.report({"INFO"}, "Custom naming scheme saved!")
+        self.report({"INFO"}, f"Successfully saved {saved_count} mapped bones to custom scheme!")
         return {"FINISHED"}
 
 
@@ -740,9 +773,18 @@ class MOTIVE_OT_export_custom_schemes(Operator, bpy_extras.io_utils.ExportHelper
     filter_glob: StringProperty(default="*.json;", options={"HIDDEN"})
 
     def execute(self, context):
+        # Auto-populate from active armature if custom schemes list is currently empty
+        if not detection_manager.bone_detection_list_custom and context.object and context.object.type == "ARMATURE":
+            for bone_name_key in animation_lists.get_bones().keys():
+                bone_selected = getattr(context.object, "motive_actor_" + bone_name_key, "")
+                if bone_selected:
+                    custom_schemes_manager.save_live_data_bone_to_list(bone_name_key, bone_selected)
+            if detection_manager.bone_detection_list_custom:
+                custom_schemes_manager.save_to_file_and_update()
+
         file_name = custom_schemes_manager.export_custom_list(self.filepath)
         if not file_name:
-            self.report({"ERROR"}, "No custom naming schemes found to export!")
+            self.report({"ERROR"}, "No custom naming schemes found to export! Map bones on an armature and click 'Save Current Naming Scheme' first.")
             return {"FINISHED"}
 
         self.report({"INFO"}, f'Exported naming schemes as "{file_name}".')

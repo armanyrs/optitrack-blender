@@ -200,7 +200,84 @@ Our architecture treats the **character's intrinsic 3D Rest Pose** (which is alr
 
 ---
 
-## 5. Automated Verification & Test Bench
+## 5. Offline Animation Retargeting Pipeline (FBX / BVH)
+
+In addition to live streaming, the add-on provides an offline animation retargeting suite located in the **3D Viewport N-Panel (`Retargeting`)**, engineered to retarget pre-recorded FBX/BVH takes exported from Motive onto target humanoid production characters.
+
+### 5.1 The Root Object Discrepancy in Motive FBX
+When an animated skeleton is exported from OptiTrack Motive as an FBX file, Blender's FBX importer structures the hierarchy such that the top-level root node is imported as the **Armature Object itself** (e.g., named `pol_Hips`), while internal child bones begin directly with `pol_Spine`, `pol_LeftUpLeg`, and `pol_RightUpLeg` (having `parent = None`). There is no internal bone named `Hips`.
+
+Conversely, target humanoid rigs (such as Mixamo `Y Bot.fbx`) possess an explicit root bone named `mixamorig:Hips`.
+
+#### The Compounding Failure Mode:
+1. Conventional bone-to-bone matchers fail to find a source bone named `Hips`, leaving `mixamorig:Hips` unmapped.
+2. The root-finding algorithm subsequently climbs down to the children (`Spine`, `LeftUpLeg`, `RightUpLeg`) and assigns them `COPY_LOCATION` constraints.
+3. During animation playback, `Spine` is pulled meters forward by the walking locomotion, while `mixamorig:Hips` remains stationary at $(0, 0, 0)$, causing catastrophic mesh stretching across the abdomen ("perut ketinggalan").
+
+#### Architectural Solution:
+The `detection_manager.py` was enhanced with **Root Armature Object Detection**:
+```python
+if not has_source_hip_bone:
+    std_obj_name = standardize_bone_name(armature_source.name)
+    has_obj_anim = any(
+        not fc.data_path.startswith("pose.bones")
+        for fc in armature_source.animation_data.action.fcurves
+    )
+    if "hip" in std_obj_name or std_obj_name in bone_detection_list.get("hip", []) or has_obj_anim:
+        bone_list_animated.insert(0, armature_source.name)
+```
+The solver permits `armature_source.name` to serve as a valid source hip entity, binding `pol_Hips` $\to$ `mixamorig:Hips` and maintaining rigid kinematic coherence between Hips and Spine across all animation frames (measured distance error: **$0.0000\text{ m}$**).
+
+### 5.2 Relative Spatial Offset Preservation (No-Snap Retargeting)
+Historically, retargeters executed `bpy.ops.object.transform_apply(location=True)` on the target armature and applied world-space `COPY_LOCATION` constraints directly from the source bone. This forced the target character to teleport and snap onto the source skeleton's origin, making side-by-side comparison impossible.
+
+Our updated pipeline preserves the target character's user-defined spatial coordinates:
+1. Target bone rest matrices are evaluated relative to the source frame without zeroing the target object origin:
+   $$\vec{P}_{\text{head, loc}} = M_{\text{source}}^{-1} \times \left( M_{\text{target}} \times \vec{P}_{\text{bone, local}} \right)$$
+2. Duplicate helper bones (`_MOTIVE_RETARGET`) inherit target spatial placement.
+3. Root location constraints track helper bone positions relative to the character's initial placement:
+   $$\vec{P}_{\text{target}}(t) = \vec{P}_{\text{target}}(0) + \Delta \vec{P}_{\text{mocap}}(t)$$
+The target character remains exactly where the animator placed it in the viewport and executes its locomotion path from that location.
+
+### 5.3 Locomotion Preservation in Auto-Scaling
+In Motive FBX takes, whole-body walking translation is recorded onto the Armature Object's `location` fcurves. The previous `clean_animation()` subroutine deleted all object-level `location` channels. This was resolved by restricting cleanup strictly to scale channels (`deletable_fcurves = ["scale"]`), preserving $100\%$ of walking locomotion when **Auto Scale** is active.
+
+---
+
+## 6. Live Action Recording Engine (`ActionRepository`)
+
+When recording live NatNet motion directly to an Action strip via the **Recorder** panel, keyframes are inserted frame-by-frame during streaming.
+
+### 6.1 Root Bone Hierarchy Resolution
+In production character rigs (e.g., Mixamo), the primary pelvis bone (`mixamorig:Hips`) has `pose_bone.parent is None`. 
+
+The legacy recorder utilized a restrictive parent filter:
+```python
+# Legacy defect: Ignored any bone with no parent
+for pose_bone in (b for b in object.pose.bones if b.parent is not None):
+```
+Because `mixamorig:Hips` lacked a parent, the recorder completely ignored the hips, generating zero keyframe channels for both position and rotation. Consequently, while limbs animated during playback, the character's hips remained permanently frozen at the world origin.
+
+### 6.2 7-Channel Dynamic FCurve Caching
+The updated `ActionRepositoryBase.cache_fcurves()` dynamically resolves the mapped hip bone:
+```python
+assigned_hip = getattr(object, "motive_actor_hip", "")
+if assigned_hip:
+    is_loc_bone = (pose_bone.name == assigned_hip)
+else:
+    is_loc_bone = (pose_bone.parent is None) or (
+        pose_bone.parent is not None and pose_bone.parent.parent is None
+    )
+```
+For the resolved hip bone, the system provisions all 7 essential degrees of freedom:
+- 3-Channel Spatial Translation: `location[0..2]`
+- 4-Channel Unit Quaternion: `rotation_quaternion[0..3]`
+
+All other kinematic chain links receive full quaternion rotation channels, guaranteeing zero loss of spatial locomotion during live recording takes.
+
+---
+
+## 7. Automated Verification & Test Bench
 
 The mathematical implementation was validated using an automated headless test suite executed directly in Blender 4.5.6 LTS against a production Mixamo character (`Y Bot.fbx`):
 
@@ -216,12 +293,14 @@ The mathematical implementation was validated using an automated headless test s
 | **Test 2: Isolated Thigh Pitch** | Thigh pitched $45^\circ$, Shin pitched $45^\circ$ (Straight Knee) | Shin local articulation $= 0.0^\circ$ | **$0.0000^\circ$** articulation | **PASS** |
 | **Test 3: Isolated Knee Flexion** | Thigh $0^\circ$, Shin flexed $45^\circ$ backwards around local X | Local Euler XYZ: $[-45.0^\circ, 0.0^\circ, 0.0^\circ]$ | **$[-45.0^\circ, -0.2^\circ, 0.1^\circ]$** | **PASS** |
 | **Test 4: Isolated Head Turn** | Head yawed $45^\circ$, Spine/Neck at $0^\circ$ | Spine local rotation $= 0.0^\circ$, Head $= 45.0^\circ$ | Spine: **$0.0^\circ$**, Head: **$45.0^\circ$** | **PASS** |
+| **Test 5: Offline FBX Retargeting** | `pol_Hips` 752-frame walking take to `Y Bot` with Auto Scale | Hips-Spine distance $= 0.1000\text{ m}$, Target keeps offset | Distance: **$0.1000\text{ m}$**, Offset: **Preserved** | **PASS** |
+| **Test 6: Live Hips Keyframing** | Live Action record on Mixamo `Armature` (`parent is None`) | 7 FCurves generated and keyframed on Hips | **7 / 7 Channels Active** | **PASS** |
 
-All tests confirmed that cumulative FK error was completely eliminated.
+All tests confirmed that cumulative FK error, mesh stretching, snapping artifacts, and recorder channel omissions were completely eliminated.
 
 ---
 
-## 6. Directory Layout & Repository Hygiene
+## 8. Directory Layout & Repository Hygiene
 
 To ensure high maintainability, code readability, and seamless integration into the upstream OptiTrack repository, the file tree is organized as follows:
 

@@ -82,6 +82,14 @@ def combine_lists(internal_list, custom_list):
 def standardize_bone_name(name):
     starts_with = [
         ("_", ""),
+        ("pcl_", ""),
+        ("Pcl_", ""),
+        ("motive_", ""),
+        ("Motive_", ""),
+        ("optitrack_", ""),
+        ("Optitrack_", ""),
+        ("skeleton_", ""),
+        ("Skeleton_", ""),
         ("ValveBiped_", ""),
         ("Valvebiped_", ""),
         ("Bip1_", "Bip_"),
@@ -163,8 +171,16 @@ def detect_bone(obj, bone_name_key, bone_name_source=None):
             continue
 
         if bone_name_key in bone_detection_list:
+            target_candidates = [bone.name.lower(), standardize_bone_name(bone.name)]
+            if "_" in bone.name:
+                parts = bone.name.split("_")
+                for idx in range(1, len(parts)):
+                    sub = "_".join(parts[idx:])
+                    target_candidates.append(sub.lower())
+                    target_candidates.append(standardize_bone_name(sub))
+
             for bone_name_detected in bone_detection_list[bone_name_key]:
-                if bone_name_detected == standardize_bone_name(bone.name):
+                if any(c == bone_name_detected for c in target_candidates):
                     found_bone_name = bone.name
                     break
 
@@ -210,6 +226,26 @@ def detect_retarget_bones():
         if len(bone_name) == 3 and bone_name[1] not in bone_list_animated:
             bone_list_animated.append(bone_name[1])
 
+    # If source armature has no explicit hip bone, check if the source object itself represents the hip
+    has_source_hip_bone = False
+    for b in bone_list_animated:
+        if standardize_bone_name(b) in bone_detection_list.get("hip", []):
+            has_source_hip_bone = True
+            break
+
+    if not has_source_hip_bone:
+        std_obj_name = standardize_bone_name(armature_source.name)
+        has_obj_anim = any(
+            not fc.data_path.startswith("pose.bones")
+            for fc in armature_source.animation_data.action.fcurves
+        )
+        if (
+            "hip" in std_obj_name
+            or std_obj_name in bone_detection_list.get("hip", [])
+            or has_obj_anim
+        ):
+            bone_list_animated.insert(0, armature_source.name)
+
     is_rokoko_animation = False
     if (
         "newton" in bone_list_animated
@@ -231,15 +267,22 @@ def detect_retarget_bones():
         main_bone_name = ""
         standardized_bone_name_source = standardize_bone_name(bone_name)
 
+        candidates = [bone_name.lower(), standardized_bone_name_source]
+        if "_" in bone_name:
+            parts = bone_name.split("_")
+            for idx in range(1, len(parts)):
+                sub = "_".join(parts[idx:])
+                candidates.append(sub.lower())
+                candidates.append(standardize_bone_name(sub))
+
         for bone_main, bone_values in bone_detection_list.items():
             if bone_main == "chest":
                 continue
             if bone_main in found_main_bones:
                 continue
-            if (
-                bone_name.lower() in bone_values
-                or standardized_bone_name_source in bone_values
-                or standardized_bone_name_source == bone_main.lower()
+            if any(
+                c in bone_values or c == bone_main.lower()
+                for c in candidates
             ):
                 main_bone_name = bone_main
                 if main_bone_name != "spine":
