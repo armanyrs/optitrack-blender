@@ -181,7 +181,7 @@ class SkeletonData:
             bpy.ops.object.mode_set(mode="OBJECT")
 
             if not is_create_armature:
-                # this ti for setting up transform_matrix
+                # Used to initialize bone transform_matrix without keeping a scene object
                 bpy.data.objects.remove(armature_object, do_unlink=True)
                 bpy.data.armatures.remove(armature, do_unlink=True)
 
@@ -321,6 +321,20 @@ class SkeletonData:
                         tpose_loc = Vector(bone_tpose_data.get("location_local", (0, 0, 0))) if bone_tpose_data else Vector((0, 0, 0))
                         pose_bone.location = tpose_loc + delta_bone_local
 
+                    try:
+                        from ..diagnostics import NetworkTelemetry
+                        NetworkTelemetry.record_bone_mapping(
+                            canonical_name=canonical_key,
+                            motive_name=animation_lists.CANONICAL_TO_MOTIVE.get(canonical_key, canonical_key),
+                            blender_bone=assigned_name,
+                            raw_pos=frame_entry.location,
+                            raw_quat=frame_entry.quaternion_rotation,
+                            blender_loc=pose_bone.location,
+                            blender_quat=pose_bone.rotation_quaternion,
+                        )
+                    except Exception:
+                        pass
+
             else:
                 # Native Motive armature pathway
                 for bone in self.bones.values():
@@ -347,6 +361,22 @@ class SkeletonData:
                             pose_bone.rotation_quaternion = bone.get_blender_frame_rot(
                                 frame_rot=frame_rot,
                             )
+                            try:
+                                from ..diagnostics import NetworkTelemetry
+                                canonical_key = animation_lists.EXTENDED_MOTIVE_TO_CANONICAL.get(
+                                    bone.bone_name, bone.bone_name
+                                )
+                                NetworkTelemetry.record_bone_mapping(
+                                    canonical_name=canonical_key,
+                                    motive_name=bone.bone_name,
+                                    blender_bone=pose_bone.name,
+                                    raw_pos=frames[bone.bone_name].location,
+                                    raw_quat=frame_rot,
+                                    blender_loc=pose_bone.location,
+                                    blender_quat=pose_bone.rotation_quaternion,
+                                )
+                            except Exception:
+                                pass
 
             if keyframe_num:
                 ActionRepository.assign_action(object=object)

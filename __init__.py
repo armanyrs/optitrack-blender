@@ -21,6 +21,7 @@ def register():
         Modified_NatNetClient,
         app_handlers,
         core,
+        diagnostics,
         icon_viewer,
         plugin_operators,
         plugin_panels,
@@ -48,6 +49,7 @@ def register():
         importlib.reload(retarget_properties)
         importlib.reload(retarget_operators)
         importlib.reload(retarget_ui)
+        importlib.reload(diagnostics)
 
     global classes
     classes = [
@@ -99,6 +101,7 @@ def register():
         bpy.utils.register_class(cls)
 
     retarget_properties.register_properties()
+    diagnostics.register_diagnostics()
     core.detection_manager.load_detection_lists()
 
     icon_viewer.IconsLoader.registering_icons()
@@ -117,8 +120,9 @@ def register():
 
 
 def unregister():
-    from . import app_handlers, icon_viewer, repository, retarget_properties
+    from . import app_handlers, diagnostics, icon_viewer, repository, retarget_properties
 
+    diagnostics.unregister_diagnostics()
     retarget_properties.unregister_properties()
 
     for cls in reversed(classes):

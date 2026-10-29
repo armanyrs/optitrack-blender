@@ -9,6 +9,7 @@ import mathutils
 from bpy.types import Operator
 
 from .Modified_NatNetClient import NatNetClient
+from .diagnostics import NetworkTelemetry
 from .repository.action import ActionRepository
 from .repository.skeleton import SkeletonRepository
 
@@ -76,6 +77,10 @@ class ConnectionSetup:
             self.streaming_client.set_client_address(dict["clientAddress"])
             self.streaming_client.set_server_address(dict["serverAddress"])
             self.streaming_client.set_use_multicast(dict["use_multicast"])
+
+            NetworkTelemetry.server_ip = dict.get("serverAddress", "127.0.0.1")
+            NetworkTelemetry.client_ip = dict.get("clientAddress", "127.0.0.1")
+            NetworkTelemetry.use_multicast = dict.get("use_multicast", True)
 
             self.is_running = self.streaming_client.run()
 
@@ -194,6 +199,7 @@ class ConnectionSetup:
         return rot_transform
 
     def receive_data_frame(self, data_dict):
+        NetworkTelemetry.record_packet(data_dict)
         self.indicate_model_changed = data_dict["tracked_models_changed"]
         self.indicate_motive_edit = data_dict["edit_mode"]
         frame_num = data_dict["frame_number"]

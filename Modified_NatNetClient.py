@@ -1064,7 +1064,9 @@ class NatNetClient:
         return model_id, marker_id
 
     # Unpack data from a motion capture frame message
-    def __unpack_mocap_data(self, data: bytes, packet_size, major, minor):
+    def __unpack_mocap_data(
+        self, data: bytes, packet_size, major, minor, t_recv=0.0, sender_addr=None
+    ):
         mocap_data = MoCapData.MoCapData()
         data = memoryview(data)
         offset = 0
@@ -1179,13 +1181,13 @@ class NatNetClient:
             data_dict["tracked_models_changed"] = tracked_models_changed
             data_dict["edit_mode"] = edit_mode
             data_dict["frame_number"] = frame_number
-            # data_dict[ "rigid_body_count" ] = rigid_body_count
-            # data_dict["rb_data"] = rb_data
-            # data_dict[ "skeleton_count" ] = skeleton_count
-            # data_dict[ "ske_data"] = ske_data
             data_dict["rb_data"] = rigid_body_data.rb_data
             data_dict["ske_data"] = skeleton_data.ske_data
-            # print(data_dict)
+            data_dict["timestamp"] = timestamp
+            data_dict["stamp_transmit"] = getattr(frame_suffix_data, "stamp_transmit", -1)
+            data_dict["packet_size"] = packet_size
+            data_dict["recv_time"] = t_recv
+            data_dict["sender_addr"] = sender_addr
             self.data_listener(data_dict)
 
         return offset, mocap_data
@@ -1966,8 +1968,11 @@ class NatNetClient:
 
         while not stop():
             # Block for input
+            t_recv = 0.0
+            addr = None
             try:
                 data, addr = in_socket.recvfrom(recv_buffer_size)
+                t_recv = time.perf_counter()
             except socket.error as msg:
                 if not stop():
                     print("ERROR: data socket access error occurred:\n  %s" % msg)
@@ -1999,12 +2004,14 @@ class NatNetClient:
                             print_level = 1
                         else:
                             print_level = 0
-                message_id, dict_temp = self.__process_message(data, print_level)
+                message_id, dict_temp = self.__process_message(
+                    data, print_level, t_recv=t_recv, sender_addr=addr
+                )
 
                 data = bytearray(0)
         return 0
 
-    def __process_message(self, data: bytes, print_level=0):
+    def __process_message(self, data: bytes, print_level=0, t_recv=0.0, sender_addr=None):
         # print("process_message")
         # return message ID
         major = self.get_major()
@@ -2036,7 +2043,7 @@ class NatNetClient:
             trace("Packet Size : ", packet_size)
 
             offset_tmp, mocap_data = self.__unpack_mocap_data(
-                data[offset:], packet_size, major, minor
+                data[offset:], packet_size, major, minor, t_recv=t_recv, sender_addr=sender_addr
             )
             offset += offset_tmp
             # print("MoCap Frame: %d\n"%(mocap_data.prefix_data.frame_number))
