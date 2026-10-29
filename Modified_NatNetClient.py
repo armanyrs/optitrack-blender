@@ -2047,9 +2047,9 @@ class NatNetClient:
             )
             offset += offset_tmp
             # print("MoCap Frame: %d\n"%(mocap_data.prefix_data.frame_number))
-            # get a string version of the data for output
-            mocap_data_str = mocap_data.get_as_string()
-            if print_level == 0:
+            # Only format and print string output when verbose print_level is enabled
+            if print_level > 0:
+                mocap_data_str = mocap_data.get_as_string()
                 print("%s\n" % mocap_data_str)
 
         elif message_id == self.NAT_MODELDEF:

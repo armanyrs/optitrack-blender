@@ -220,6 +220,24 @@ class ConnectionSetup:
                 # sequence -> (assetID, pos, rot, frame_num, assetType, ske_rb)
                 value = (b_id, pos1, rot1, frame_num, "rigid_body", None)
                 values.append(value)
+                try:
+                    rb_name = self.assets_motive.get("rb_desc", {}).get(key1, {}).get("name", f"RigidBody_{key1}")
+                    b_obj_entry = self.rev_assets_blender.get(b_id, {})
+                    b_obj_name = b_obj_entry["obj"].name if "obj" in b_obj_entry and b_obj_entry["obj"] else f"Object_{b_id}"
+                    raw_p = mathutils.Vector(m_val["pos"])
+                    raw_r = m_val["rot"]
+                    raw_q = mathutils.Quaternion((raw_r[3], raw_r[0], raw_r[1], raw_r[2]))
+                    NetworkTelemetry.record_bone_mapping(
+                        canonical_name=f"rigid_body_{key1}",
+                        motive_name=f"{rb_name} (ID: {key1})",
+                        blender_bone=b_obj_name,
+                        raw_pos=raw_p,
+                        raw_quat=raw_q,
+                        blender_loc=mathutils.Vector(pos1),
+                        blender_quat=rot1,
+                    )
+                except Exception:
+                    pass
 
         for skeleton_id, frame_data in data_dict.get("ske_data", {}).items():
             skeleton_data = SkeletonRepository.get_by_id(skeleton_id=skeleton_id)

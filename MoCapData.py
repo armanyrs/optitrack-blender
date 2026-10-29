@@ -342,9 +342,12 @@ class RigidBodyData:
 
     def add_rigid_body(self, rigid_body):
         self.rigid_body_list.append(copy.deepcopy(rigid_body))
-        self.rb_data[rigid_body.id_num] = {}
-        self.rb_data[rigid_body.id_num]["pos"] = rigid_body.pos
-        self.rb_data[rigid_body.id_num]["rot"] = rigid_body.rot
+        self.rb_data[rigid_body.id_num] = {
+            "pos": rigid_body.pos,
+            "rot": rigid_body.rot,
+            "error": getattr(rigid_body, "error", 0.0),
+            "tracking_valid": getattr(rigid_body, "tracking_valid", True),
+        }
         return len(self.rigid_body_list)
 
     def get_rigid_body_count(self):
@@ -384,9 +387,12 @@ class Skeleton:
 
     def add_rigid_body(self, rigid_body):
         self.rigid_body_list.append(copy.deepcopy(rigid_body))
-        self.rb_data[rigid_body.id_num] = {}
-        self.rb_data[rigid_body.id_num]["pos"] = rigid_body.pos
-        self.rb_data[rigid_body.id_num]["rot"] = rigid_body.rot
+        self.rb_data[rigid_body.id_num] = {
+            "pos": rigid_body.pos,
+            "rot": rigid_body.rot,
+            "error": getattr(rigid_body, "error", 0.0),
+            "tracking_valid": getattr(rigid_body, "tracking_valid", True),
+        }
         return len(self.rigid_body_list)
 
     def get_as_string(self, tab_str="  ", level=0):
