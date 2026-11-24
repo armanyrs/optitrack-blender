@@ -48,7 +48,7 @@ class ActionRepositoryProtocol(Protocol):
         raise NotImplementedError()
 
     @classmethod
-    def cache_fcurves(cls, objects: list[Object]):
+    def cache_fcurves(cls, objects: list[Object], clear_existing: bool = True):
         raise NotImplementedError()
 
     @classmethod
@@ -91,10 +91,26 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
         return True
 
     @classmethod
-    def cache_fcurves(cls, objects: list[Object]):
+    def cache_fcurves(cls, objects: list[Object], clear_existing: bool = True):
+        if clear_existing:
+            cls.fcurves = {}
+        else:
+            # Purge any removed object keys
+            for existing_obj in list(cls.fcurves.keys()):
+                try:
+                    _ = existing_obj.name
+                except ReferenceError:
+                    del cls.fcurves[existing_obj]
 
-        cls.fcurves = {}
         for object in objects:
+            try:
+                if object is None or object.name not in bpy.data.objects:
+                    continue
+                if object.type != "ARMATURE" or object.pose is None:
+                    continue
+            except ReferenceError:
+                continue
+
             cls.assign_action(object)
 
             fcurves = cls.get_fcurves(object=object)
@@ -165,18 +181,39 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
         object: Object,
         frame_num: int,
     ):
-        if object not in cls.fcurves:
-            cls.cache_fcurves([object])
-        pose_bone_to_fcurves = cls.fcurves[object]
+        try:
+            if object is None or object.name not in bpy.data.objects:
+                return
+        except ReferenceError:
+            return
 
-        for pose_bone, fcurves in pose_bone_to_fcurves.items():
-            for fcurve_index, fcurve in fcurves.items():
-                value = fcurve_index.get_keyframe_value(pose_bone)
-                fcurve.keyframe_points.insert(
-                    frame=frame_num,
-                    value=value,
-                    options={"FAST"},
-                )
+        if object not in cls.fcurves:
+            cls.cache_fcurves([object], clear_existing=False)
+        pose_bone_to_fcurves = cls.fcurves.get(object)
+        if not pose_bone_to_fcurves:
+            return
+
+        try:
+            for pose_bone, fcurves in pose_bone_to_fcurves.items():
+                for fcurve_index, fcurve in fcurves.items():
+                    value = fcurve_index.get_keyframe_value(pose_bone)
+                    fcurve.keyframe_points.insert(
+                        frame=frame_num,
+                        value=value,
+                        options={"FAST"},
+                    )
+        except ReferenceError:
+            # Re-cache if FCurve or PoseBone pointers were invalidated
+            cls.cache_fcurves([object], clear_existing=False)
+            pose_bone_to_fcurves = cls.fcurves.get(object, {})
+            for pose_bone, fcurves in pose_bone_to_fcurves.items():
+                for fcurve_index, fcurve in fcurves.items():
+                    value = fcurve_index.get_keyframe_value(pose_bone)
+                    fcurve.keyframe_points.insert(
+                        frame=frame_num,
+                        value=value,
+                        options={"FAST"},
+                    )
 
 
 class ActionRepositoryWithSlot(ActionRepositoryBase):
@@ -214,22 +251,34 @@ class ActionRepositoryWithSlot(ActionRepositoryBase):
         action_name = cls.get_action_name()
         if not object.animation_data:
             object.animation_data_create()
+        action = cls.get_action(action_name=action_name)
+        if object.animation_data.action != action:
+            object.animation_data.action = action
+
+        expected_slot_id = f"OB{object.name}"
+        current_slot = object.animation_data.action_slot
         if (
-            object.animation_data.action is None
-            or object.animation_data.action.name != action_name
+            current_slot is None
+            or getattr(current_slot, "identifier", "") != expected_slot_id
         ):
-            object.animation_data.action = cls.get_action(
-                action_name=action_name,
+            action_slot = (
+                action.slots.get(expected_slot_id)
+                or action.slots.get(object.name)
             )
-        if object.animation_data.action_slot is None:
-            # get action_slot
-            action_slot = object.animation_data.action.slots.get(object.name)
             if action_slot is None:
-                action_slot = object.animation_data.action.slots.new(
+                action_slot = action.slots.new(
                     id_type="OBJECT", name=object.name
                 )
-
             object.animation_data.action_slot = action_slot
+
+        if not action.layers:
+            action.layers.new("Layer")
+        layer = action.layers[0]
+        if not layer.strips:
+            layer.strips.new(type="KEYFRAME")
+        strip = layer.strips[0]
+        if object.animation_data.action_slot is not None:
+            strip.channelbag(object.animation_data.action_slot, ensure=True)
 
 
 class ActionRepositoryWithoutSlot(ActionRepositoryBase):

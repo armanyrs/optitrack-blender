@@ -6,6 +6,10 @@
         "custom_bone_pol_hips.001": [
             "pol_hips.001",
             "mixamorig:hips"
+        ],
+        "custom_bone_haidar_hips.001": [
+            "haidar_hips.001",
+            "mixamorig:hips"
         ]
     },
     "shapes": {}

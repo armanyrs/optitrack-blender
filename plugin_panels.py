@@ -1,6 +1,5 @@
 import bpy
 
-# from .plugin_skeletons import skeletonDict
 from bpy.types import Panel
 
 from . import plugin_operators
@@ -58,8 +57,6 @@ class Connection(Panel):
 
     def draw(self, context):
         layout = self.layout
-        Scene = context.scene
-        initprop = Scene.init_prop
 
         row = layout.row(align=True)
         if context.window_manager.connection_status:
@@ -72,7 +69,8 @@ class Connection(Panel):
             row = layout.row(align=True)
             row.label(text="Motive Assets (ID: Name)")
             row = layout.row(align=True)
-            obj_ls = ConnectOperator.connection_setup.streaming_client.desc_dict
+            client = ConnectOperator.connection_setup.streaming_client
+            obj_ls = client.desc_dict if client else None
             if obj_ls:
                 box = layout.box()
                 for key, val in obj_ls.items():
@@ -334,24 +332,35 @@ class AllocatedObjects(Panel):
     def draw(self, context):
         existing_conn = plugin_operators.ConnectOperator.connection_setup
         layout = self.layout
-        for key, val in existing_conn.assets_blender.items():  # assetType: m_ID: b_ID
-            for k, v in val.items():  # m_ID: b_ID
+        desc_source = (
+            existing_conn.assets_motive
+            or (existing_conn.streaming_client.desc_dict if existing_conn.streaming_client else {})
+            or {}
+        )
+        for key, val in list(existing_conn.assets_blender.items()):
+            for k, v in list(val.items()):
                 m_ID = k
-                b_ID = v["b_ID"]
-                b_obj_name = existing_conn.rev_assets_blender[v["b_ID"]]["obj"].name
+                b_ID = v.get("b_ID")
+                rev_entry = existing_conn.rev_assets_blender.get(b_ID)
+                if not rev_entry or not rev_entry.get("obj"):
+                    continue
+                try:
+                    b_obj_name = rev_entry["obj"].name
+                except ReferenceError:
+                    continue
 
                 row = layout.row(align=True)
                 row.alert = True
 
                 if key == "rigid_body":
-                    m_obj_name = existing_conn.assets_motive["rb_desc"][k]["name"]
+                    m_obj_name = desc_source.get("rb_desc", {}).get(k, {}).get("name", f"RB_{k}")
                     row.label(
                         text=b_obj_name + " : " + str(m_ID) + " : " + str(m_obj_name),
                         icon="OUTLINER_DATA_MESH",
                     )
 
                 elif key == "skeleton":
-                    m_obj_name = existing_conn.assets_motive["ske_desc"][k]["name"]
+                    m_obj_name = desc_source.get("ske_desc", {}).get(k, {}).get("name", f"Skeleton_{k}")
                     row.label(
                         text=b_obj_name + " : " + str(m_ID) + " : " + str(m_obj_name),
                         icon="OUTLINER_OB_ARMATURE",
@@ -379,26 +388,24 @@ class AllocatedArmatureBones(Panel):
                 "skeleton"
             ]:
                 return True
-        # return bool(plugin_operators.ConnectOperator.connection_setup.assets_blender['skeleton'])
 
     def draw(self, context):
         existing_conn = plugin_operators.ConnectOperator.connection_setup
         layout = self.layout
-        for key, val in existing_conn.assets_blender[
-            "skeleton"
-        ].items():  # assetType: m_ID: b_ID
+        desc_source = (
+            existing_conn.assets_motive
+            or (existing_conn.streaming_client.desc_dict if existing_conn.streaming_client else {})
+            or {}
+        )
+        for key, val in existing_conn.assets_blender.get("skeleton", {}).items():
+            ske_info = desc_source.get("ske_desc", {}).get(key, {})
             row = layout.row(align=True)
             row.alert = True
-            row.label(text=existing_conn.assets_motive["ske_desc"][key]["name"] + ": ")
-            for k, v in val["ske_rb_map"]["b_to_m"].items():  # m_ID: b_ID
+            row.label(text=ske_info.get("name", f"Skeleton_{key}") + ": ")
+            for k, v in val.get("ske_rb_map", {}).get("b_to_m", {}).items():
+                rb_name = ske_info.get("rb_id", {}).get(v, {}).get("name", str(v))
                 row = layout.row(align=True)
-                row.label(
-                    text=k
-                    + " : "
-                    + str(v)
-                    + " : "
-                    + existing_conn.assets_motive["ske_desc"][key]["rb_id"][v]["name"]
-                )
+                row.label(text=f"{k} : {v} : {rb_name}")
 
 
 class Info(Panel):
@@ -418,6 +425,8 @@ class Info(Panel):
             text="OptiTrack Documentation", icon_value=IconsLoader.get_icon("Info")
         )
         row = layout.row(align=True)
-        
-        row.operator("wm.url_open", text = "Website").url = "https://optitrack.com"
-        row.operator("wm.url_open", text = "Documentation").url = "https://docs.optitrack.com/plugins/optitrack-blender-plugin/optitrack-blender-plugin"
+
+        row.operator("wm.url_open", text="Website").url = "https://optitrack.com"
+        row.operator("wm.url_open", text="Documentation").url = (
+            "https://docs.optitrack.com/plugins/optitrack-blender-plugin/optitrack-blender-plugin"
+        )

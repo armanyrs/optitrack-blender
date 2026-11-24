@@ -70,6 +70,8 @@ class BoneData:
 
     def to_blender_rot(self, rot: Quaternion) -> Quaternion:
         convert3 = self.transform_matrix
+        if convert3 is None:
+            convert3 = Matrix(((1, 0, 0), (0, 0, 1), (0, -1, 0)))
         return (convert3 @ rot.to_matrix() @ convert3.inverted()).to_quaternion()
 
     def to_motive_pos(self, pos: Vector) -> Vector:
@@ -116,14 +118,24 @@ class SkeletonData:
         self,
         is_create_armature: bool = True,
     ) -> bool:
+        prev_active = bpy.context.view_layer.objects.active
+        armature = None
+        armature_object = None
         try:
+            if prev_active is not None and prev_active.mode != "OBJECT":
+                try:
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                except Exception:
+                    pass
+
             armature = bpy.data.armatures.new(self.skeleton_name)
             armature_object = bpy.data.objects.new(self.skeleton_name, armature)
             bpy.context.collection.objects.link(armature_object)
             bpy.context.view_layer.objects.active = armature_object
 
             def get_bone_direction(head: Vector) -> Vector:
-                heap_head = self.bones[0].child.get_blender_global_pos()
+                root_child = self.bones[0].child if (0 in self.bones and self.bones[0].child) else None
+                heap_head = root_child.get_blender_global_pos() if root_child else Vector()
                 offset = head - heap_head
 
                 if offset.z < -0.2:
@@ -140,9 +152,8 @@ class SkeletonData:
                     direction = Vector((0, 0, 1))
                 return direction
 
+            bpy.ops.object.mode_set(mode="EDIT")
             for bone in self.bones.values():
-                bpy.ops.object.mode_set(mode="EDIT")
-
                 edit_bone = armature_object.data.edit_bones.new(bone.bone_name)
 
                 if bone.parent is not None:
@@ -151,7 +162,7 @@ class SkeletonData:
                     )
                     edit_bone.parent = edit_bone_parent
 
-                    if bone.parent.child is bone:
+                    if bone.parent.child is bone and edit_bone_parent is not None:
                         edit_bone_parent.tail = bone.get_blender_global_pos()
                         bone.parent.set_transform_matrix(edit_bone=edit_bone_parent)
 
@@ -165,7 +176,7 @@ class SkeletonData:
                 if bone.child is None:
                     direction = get_bone_direction(edit_bone.head)
 
-                    bone_length = edit_bone.parent.length
+                    bone_length = edit_bone.parent.length if edit_bone.parent else 0.1
 
                     edit_bone.tail = direction * bone_length + edit_bone.head
 
@@ -173,17 +184,42 @@ class SkeletonData:
 
                 edit_bone.use_local_location = True
                 edit_bone.use_inherit_rotation = True
-        except:
+        except Exception:
             raise
         else:
+            if is_create_armature and armature_object is not None:
+                SkeletonRepository.render_object_to_skeleton[armature_object] = self
+                try:
+                    if hasattr(armature_object, "obj_prop"):
+                        armature_object.obj_prop.obj_name = armature_object.name
+                        armature_object.obj_prop.skeletons = str(self.skeleton_id)
+                except Exception:
+                    pass
             return True
         finally:
-            bpy.ops.object.mode_set(mode="OBJECT")
+            try:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except Exception:
+                pass
 
             if not is_create_armature:
-                # Used to initialize bone transform_matrix without keeping a scene object
+<<<<<<< Updated upstream
+                # this ti for setting up transform_matrix
                 bpy.data.objects.remove(armature_object, do_unlink=True)
                 bpy.data.armatures.remove(armature, do_unlink=True)
+=======
+                # Used to initialize bone transform_matrix without keeping a scene object
+                if armature_object is not None:
+                    bpy.data.objects.remove(armature_object, do_unlink=True)
+                if armature is not None:
+                    bpy.data.armatures.remove(armature, do_unlink=True)
+                if prev_active is not None:
+                    try:
+                        if prev_active.name in bpy.data.objects:
+                            bpy.context.view_layer.objects.active = prev_active
+                    except ReferenceError:
+                        pass
+>>>>>>> Stashed changes
 
     def create_frame_data(
         self,
@@ -223,7 +259,14 @@ class SkeletonData:
         keyframe_num: Optional[int] = None,
     ):
         try:
+            if object is None or object.name not in bpy.data.objects:
+                SkeletonRepository.remove_render_object(object)
+                return
+
             frames = frame_data
+            multi_ske = len(SkeletonRepository.skeletons) > 1
+            ske_prefix = f"{self.skeleton_name}:" if multi_ske else ""
+            obj_prefix = f"{object.name}:" if multi_ske else ""
 
             # Check if this object has retargeting mapped bones
             custom_data = object.get("CUSTOM", {})
@@ -270,10 +313,6 @@ class SkeletonData:
                         data_bone.use_inherit_rotation = True
 
                     # Compute parent-relative rotation in Motive space
-                    # Because Motive streams global orientations for rigid bodies/bones,
-                    # applying them directly in an inheriting FK chain causes rotations to multiply down the hierarchy.
-                    # Converting to parent-relative rotation (Q_local = Q_parent^-1 @ Q_child) ensures each joint
-                    # only rotates by its actual articulated delta.
                     parent_key = animation_lists.CANONICAL_PARENT.get(canonical_key)
                     q_child = frame_entry.quaternion_rotation
 
@@ -312,21 +351,22 @@ class SkeletonData:
                     # Root hip translation
                     if canonical_key == "hip":
                         p = frame_entry.location
-                        # World displacement: X is left/right, Y is -Z (depth), Z is Y - rest_y (height delta)
                         delta_world = Vector((p.x, -p.z, p.y - motive_rest_y))
-                        # Convert to bone local displacement respecting armature world scale/rotation
                         delta_armature = object.matrix_world.to_3x3().inverted() @ delta_world
                         delta_bone_local = pose_bone.bone.matrix_local.to_3x3().inverted() @ delta_armature
 
                         tpose_loc = Vector(bone_tpose_data.get("location_local", (0, 0, 0))) if bone_tpose_data else Vector((0, 0, 0))
                         pose_bone.location = tpose_loc + delta_bone_local
 
+<<<<<<< Updated upstream
+=======
                     try:
                         from ..diagnostics import NetworkTelemetry
+                        mot_bname = animation_lists.CANONICAL_TO_MOTIVE.get(canonical_key, canonical_key)
                         NetworkTelemetry.record_bone_mapping(
-                            canonical_name=canonical_key,
-                            motive_name=animation_lists.CANONICAL_TO_MOTIVE.get(canonical_key, canonical_key),
-                            blender_bone=assigned_name,
+                            canonical_name=f"{ske_prefix}{canonical_key}",
+                            motive_name=f"{ske_prefix}{mot_bname}",
+                            blender_bone=f"{obj_prefix}{assigned_name}",
                             raw_pos=frame_entry.location,
                             raw_quat=frame_entry.quaternion_rotation,
                             blender_loc=pose_bone.location,
@@ -335,8 +375,15 @@ class SkeletonData:
                     except Exception:
                         pass
 
+>>>>>>> Stashed changes
             else:
                 # Native Motive armature pathway
+                if self.bones and 0 in self.bones and self.bones[0].transform_matrix is None:
+                    try:
+                        self.create_armature(is_create_armature=False)
+                    except Exception:
+                        pass
+
                 for bone in self.bones.values():
                     if bone.bone_name not in object.pose.bones:
                         continue
@@ -361,15 +408,17 @@ class SkeletonData:
                             pose_bone.rotation_quaternion = bone.get_blender_frame_rot(
                                 frame_rot=frame_rot,
                             )
+<<<<<<< Updated upstream
+=======
                             try:
                                 from ..diagnostics import NetworkTelemetry
                                 canonical_key = animation_lists.EXTENDED_MOTIVE_TO_CANONICAL.get(
                                     bone.bone_name, bone.bone_name
                                 )
                                 NetworkTelemetry.record_bone_mapping(
-                                    canonical_name=canonical_key,
-                                    motive_name=bone.bone_name,
-                                    blender_bone=pose_bone.name,
+                                    canonical_name=f"{ske_prefix}{canonical_key}",
+                                    motive_name=f"{ske_prefix}{bone.bone_name}",
+                                    blender_bone=f"{obj_prefix}{pose_bone.name}",
                                     raw_pos=frames[bone.bone_name].location,
                                     raw_quat=frame_rot,
                                     blender_loc=pose_bone.location,
@@ -377,8 +426,9 @@ class SkeletonData:
                                 )
                             except Exception:
                                 pass
+>>>>>>> Stashed changes
 
-            if keyframe_num:
+            if keyframe_num is not None:
                 ActionRepository.assign_action(object=object)
                 ActionRepository.keyframe_insert(
                     object=object,
@@ -396,26 +446,54 @@ class SkeletonRepository:
     render_object_to_skeleton: dict[Object, Optional[SkeletonData]] = {}
 
     @classmethod
+    def purge_invalid_objects(cls) -> None:
+        for obj in list(cls.render_object_to_skeleton.keys()):
+            try:
+                if obj is None or obj.name not in bpy.data.objects:
+                    del cls.render_object_to_skeleton[obj]
+            except ReferenceError:
+                del cls.render_object_to_skeleton[obj]
+
+    @classmethod
+    def sync_scene_armatures(cls) -> None:
+        cls.purge_invalid_objects()
+        for obj in bpy.data.objects:
+            if obj.type == "ARMATURE":
+                sk_prop = ""
+                if hasattr(obj, "obj_prop"):
+                    sk_prop = getattr(obj.obj_prop, "skeletons", "")
+                if sk_prop and sk_prop not in ["None", ""]:
+                    try:
+                        sk_id = int(sk_prop)
+                        if sk_id in cls.skeletons:
+                            cls.render_object_to_skeleton[obj] = cls.skeletons[sk_id]
+                    except (ValueError, TypeError):
+                        pass
+                elif obj not in cls.render_object_to_skeleton:
+                    # Also match native Motive armatures by exact skeleton name
+                    if obj.name in cls.skeleton_name_to_id:
+                        sk_id = cls.skeleton_name_to_id[obj.name]
+                        if sk_id in cls.skeletons:
+                            cls.render_object_to_skeleton[obj] = cls.skeletons[sk_id]
+
+    @classmethod
     def append_skeleton(cls, skeleton: SkeletonData) -> None:
         cls.skeletons[skeleton.skeleton_id] = skeleton
         cls.skeleton_name_to_id[skeleton.skeleton_name] = skeleton.skeleton_id
 
-        # Auto-sync any existing scene objects that have already selected this skeleton
-        for obj in bpy.data.objects:
-            if obj.type == "ARMATURE" and hasattr(obj, "obj_prop"):
-                sk_prop = getattr(obj.obj_prop, "skeletons", "")
-                if sk_prop and sk_prop not in ["None", ""]:
-                    try:
-                        if int(sk_prop) == skeleton.skeleton_id:
-                            cls.render_object_to_skeleton[obj] = skeleton
-                    except (ValueError, TypeError):
-                        pass
+        try:
+            cls.sync_scene_armatures()
+        except Exception:
+            pass
 
     @classmethod
     def set_transform_matrix(cls) -> None:
         for skeleton in cls.skeletons.values():
             if skeleton.bones and 0 in skeleton.bones and skeleton.bones[0].transform_matrix is None:
-                skeleton.create_armature(is_create_armature=False)
+                try:
+                    skeleton.create_armature(is_create_armature=False)
+                except Exception:
+                    pass
 
     @classmethod
     def create_armatures(
@@ -437,12 +515,16 @@ class SkeletonRepository:
 
     @classmethod
     def update_render_object(cls, skeleton_id: str, object: Object):
+        cls.purge_invalid_objects()
         try:
             sk_id = int(skeleton_id)
         except (ValueError, TypeError):
             sk_id = -1
 
-        cls.render_object_to_skeleton[object] = cls.skeletons.get(sk_id)
+        if sk_id in cls.skeletons:
+            cls.render_object_to_skeleton[object] = cls.skeletons[sk_id]
+        elif object in cls.render_object_to_skeleton:
+            del cls.render_object_to_skeleton[object]
 
     @classmethod
     def remove_render_object(cls, object: Object):
@@ -457,7 +539,7 @@ class SkeletonRepository:
         for object in list(cls.render_object_to_skeleton.keys()):
             try:
                 object.obj_prop.skeletons = "None"
-            except:
+            except Exception:
                 pass
 
         cls.render_object_to_skeleton = {}
@@ -469,6 +551,7 @@ class SkeletonRepository:
         frame_data: dict[str, FrameData],
         keyframe_num: Optional[int] = None,
     ):
+        cls.purge_invalid_objects()
         rendered = False
         for object, skeleton_data in list(cls.render_object_to_skeleton.items()):
             if (
@@ -482,27 +565,30 @@ class SkeletonRepository:
                 )
                 rendered = True
 
-        # Fallback: if render_object_to_skeleton was not mapped yet, check all scene armatures
+        # Fallback: if render_object_to_skeleton was not mapped yet, sync and check all scene armatures
         if not rendered:
-            for obj in bpy.data.objects:
-                if obj.type == "ARMATURE" and hasattr(obj, "obj_prop"):
-                    sk_prop = getattr(obj.obj_prop, "skeletons", "")
-                    if sk_prop and sk_prop not in ["None", ""]:
-                        try:
-                            if int(sk_prop) == target_skeleton_data.skeleton_id:
-                                cls.render_object_to_skeleton[obj] = target_skeleton_data
-                                target_skeleton_data.render_skeleton_and_insert_keyframe(
-                                    object=obj,
-                                    keyframe_num=keyframe_num,
-                                    frame_data=frame_data,
-                                )
-                        except (ValueError, TypeError):
-                            pass
+            cls.sync_scene_armatures()
+            for object, skeleton_data in list(cls.render_object_to_skeleton.items()):
+                if (
+                    skeleton_data is not None
+                    and skeleton_data.skeleton_id == target_skeleton_data.skeleton_id
+                ):
+                    skeleton_data.render_skeleton_and_insert_keyframe(
+                        object=object,
+                        keyframe_num=keyframe_num,
+                        frame_data=frame_data,
+                    )
 
     @classmethod
     def get_render_skeletons(cls) -> list[Object]:
-        return list(
-            object
-            for object, skeleton_data in cls.render_object_to_skeleton.items()
-            if skeleton_data is not None
-        )
+        cls.sync_scene_armatures()
+        valid_objects = []
+        for object, skeleton_data in list(cls.render_object_to_skeleton.items()):
+            if skeleton_data is None:
+                continue
+            try:
+                if object is not None and object.name in bpy.data.objects:
+                    valid_objects.append(object)
+            except ReferenceError:
+                del cls.render_object_to_skeleton[object]
+        return valid_objects
