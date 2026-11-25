@@ -13,6 +13,72 @@ from .retarget_properties import BoneListItem, get_source_armature, get_target_a
 RETARGET_ID = "_MOTIVE_RETARGET"
 
 
+def _select_pose_bone(armature, bone_name, state=True):
+    """Selects a pose bone across Blender 3.6-4.x (Bone.select) and 5.0+ (PoseBone.select)."""
+    pb = armature.pose.bones.get(bone_name)
+    if pb is not None and hasattr(pb, "select"):
+        pb.select = state
+        return
+    db = armature.data.bones.get(bone_name)
+    if db is not None and hasattr(db, "select"):
+        db.select = state
+
+
+def _get_action_fcurves(action, obj=None, ensure=False):
+    """Returns the FCurves collection for an Action on Blender 3.6-4.x and 5.0+ (Slotted Actions)."""
+    if action is None:
+        return None
+    if hasattr(action, "fcurves"):
+        return action.fcurves
+
+    if not hasattr(action, "layers"):
+        return None
+
+    slot = None
+    if obj is not None and obj.animation_data and getattr(obj.animation_data, "action_slot", None):
+        if obj.animation_data.action == action:
+            slot = obj.animation_data.action_slot
+    if slot is None and len(action.slots) > 0:
+        slot = action.slots[0]
+    if slot is None and ensure:
+        slot_name = obj.name if obj is not None else "Object"
+        slot = action.slots.new(id_type="OBJECT", name=slot_name)
+    if slot is None:
+        return None
+
+    if obj is not None and obj.animation_data and obj.animation_data.action == action:
+        if getattr(obj.animation_data, "action_slot", None) != slot:
+            obj.animation_data.action_slot = slot
+
+    if not action.layers:
+        if not ensure:
+            return None
+        action.layers.new("Layer")
+    layer = action.layers[0]
+
+    if not layer.strips:
+        if not ensure:
+            return None
+        layer.strips.new(type="KEYFRAME")
+    strip = layer.strips[0]
+
+    channelbag = strip.channelbag(slot, ensure=ensure)
+    return channelbag.fcurves if channelbag is not None else None
+
+
+def _new_fcurve(fcurves_collection, data_path, index, group_name=""):
+    """Creates an FCurve cleanly on both Blender <5.0 (action_group) and 5.0+ (group_name)."""
+    if bpy.app.version >= (5, 0, 0):
+        if group_name:
+            return fcurves_collection.new(
+                data_path=data_path, index=index, group_name=group_name
+            )
+        return fcurves_collection.new(data_path=data_path, index=index)
+    return fcurves_collection.new(
+        data_path=data_path, index=index, action_group=group_name
+    )
+
+
 class MOTIVE_OT_build_bone_list(Operator):
     """Builds the bone list from the animated source armature and auto-matches target bones."""
 
@@ -271,7 +337,7 @@ class MOTIVE_OT_retarget_animation(Operator):
                 constraint.target = armature_source
                 constraint.subtarget = item.bone_name_target + RETARGET_ID
 
-            armature_target.data.bones.get(item.bone_name_target).select = True
+            _select_pose_bone(armature_target, item.bone_name_target, True)
 
         # Bake animation
         self.bake_animation(armature_source, armature_target, root_bones)
@@ -330,9 +396,12 @@ class MOTIVE_OT_retarget_animation(Operator):
         deletable_fcurves = ["scale"]
         if not armature_source.animation_data or not armature_source.animation_data.action:
             return
-        for fcurve in list(armature_source.animation_data.action.fcurves):
+        fcurves = _get_action_fcurves(armature_source.animation_data.action, armature_source)
+        if not fcurves:
+            return
+        for fcurve in list(fcurves):
             if fcurve.data_path in deletable_fcurves:
-                armature_source.animation_data.action.fcurves.remove(fcurve)
+                fcurves.remove(fcurve)
 
     def get_and_reset_pose_rotations(self, armature):
         bpy.ops.object.select_all(action="DESELECT")
@@ -487,15 +556,20 @@ class MOTIVE_OT_retarget_animation(Operator):
 
         key_counts = {}
         for action in actions_all:
-            for fcurve in action.fcurves:
+            act_fcurves = _get_action_fcurves(action)
+            if not act_fcurves:
+                continue
+            for fcurve in act_fcurves:
                 key = fcurve.data_path + str(fcurve.array_index)
                 key_counts[key] = key_counts.get(key, 0) + len(fcurve.keyframe_points)
 
         action_final = bpy.data.actions.new(name="MOTIVE_RETARGETING_FINAL")
         action_final.use_fake_user = True
         armature_target.animation_data_create().action = action_final
+        final_fcurves = _get_action_fcurves(action_final, armature_target, ensure=True)
 
-        for fcurve in actions_all[0].fcurves:
+        first_fcurves = _get_action_fcurves(actions_all[0]) or []
+        for fcurve in first_fcurves:
             if fcurve.data_path.endswith("scale"):
                 continue
             if fcurve.data_path.endswith("location"):
@@ -504,17 +578,21 @@ class MOTIVE_OT_retarget_animation(Operator):
                     continue
 
             group_name = fcurve.group.name if fcurve.group else ""
-            curve_final = action_final.fcurves.new(
+            curve_final = _new_fcurve(
+                final_fcurves,
                 data_path=fcurve.data_path,
                 index=fcurve.array_index,
-                action_group=group_name,
+                group_name=group_name,
             )
             keyframe_points = curve_final.keyframe_points
             keyframe_points.add(key_counts[fcurve.data_path + str(fcurve.array_index)])
 
             idx = 0
             for action in actions_all:
-                fc_to_add = action.fcurves.find(
+                src_fcurves = _get_action_fcurves(action)
+                if not src_fcurves:
+                    continue
+                fc_to_add = src_fcurves.find(
                     data_path=fcurve.data_path, index=fcurve.array_index
                 )
                 if not fc_to_add:
@@ -525,7 +603,7 @@ class MOTIVE_OT_retarget_animation(Operator):
                     keyframe_points[idx].interpolation = "LINEAR"
                     idx += 1
 
-        for fcurve in action_final.fcurves:
+        for fcurve in final_fcurves:
             if len(fcurve.keyframe_points) <= 2:
                 continue
             kp_pre_pre = fcurve.keyframe_points[0]

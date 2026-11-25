@@ -2,8 +2,8 @@
 bl_info = {
     "name": "Motive Blender Plugin",
     "author": "OptiTrack",
-    "version": (1, 2, 0),
-    "blender": (4, 4, 0),
+    "version": (1, 2, 1),
+    "blender": (3, 6, 0),
     "location": "View3D > Toolbar > Motive",
     "description": "Stream Motive asset data and retarget motion in Blender",
     "warning": "",
