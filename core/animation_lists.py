@@ -1,5 +1,8 @@
 from collections import OrderedDict
+import re
 from mathutils import Quaternion
+
+_LIVE_BONE_DELIM_RE = re.compile(r'[_:\-\.\s/"\'\\|]+')
 
 # Canonical actor bone list with reference T-pose rotations
 actor_bones = OrderedDict()
@@ -323,9 +326,10 @@ def find_frame_data_for_canonical_bone(canonical_key, frames, skeleton_name=""):
         if cand in frames:
             return frames[cand]
 
-    # 3. Normalized check (strip prefix and case-insensitive)
+    # 3. Normalized check (strip prefix, delimiters, and case-insensitive)
     prefix = (skeleton_name.lower() + "_") if skeleton_name else ""
     colon_prefix = (skeleton_name.lower() + ":") if skeleton_name else ""
+    raw_skel_prefix = skeleton_name.lower() if skeleton_name else ""
 
     cand_set = {c.lower() for c in candidates}
     for frame_bone_name, frame_entry in frames.items():
@@ -334,9 +338,19 @@ def find_frame_data_for_canonical_bone(canonical_key, frames, skeleton_name=""):
             clean_name = clean_name[len(prefix):]
         elif colon_prefix and clean_name.startswith(colon_prefix):
             clean_name = clean_name[len(colon_prefix):]
-        clean_name = clean_name.lstrip("_: ")
+        elif raw_skel_prefix and clean_name.startswith(raw_skel_prefix):
+            clean_name = clean_name[len(raw_skel_prefix):]
+        clean_name = clean_name.lstrip("_:-. /\"'\\|")
 
         if clean_name in cand_set:
             return frame_entry
+
+        tokens = [t for t in _LIVE_BONE_DELIM_RE.split(frame_bone_name) if t]
+        if len(tokens) > 1:
+            for idx in range(1, len(tokens)):
+                suffix_under = "_".join(tokens[idx:]).lower()
+                suffix_joined = "".join(tokens[idx:]).lower()
+                if suffix_under in cand_set or suffix_joined in cand_set:
+                    return frame_entry
 
     return None

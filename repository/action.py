@@ -133,8 +133,10 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
                         pose_bone.parent is not None and pose_bone.parent.parent is None
                     )
 
+                escaped_bone_name = bpy.utils.escape_identifier(pose_bone.name)
+
                 if is_loc_bone:
-                    data_path = f'pose.bones["{pose_bone.name}"].location'
+                    data_path = f'pose.bones["{escaped_bone_name}"].location'
                     for fcurve_index_enum in [
                         FCurveIndexEnum.LOCATION_X,
                         FCurveIndexEnum.LOCATION_Y,
@@ -153,7 +155,7 @@ class ActionRepositoryBase(ActionRepositoryProtocol):
                         pose_bone_fcurves[fcurve_index_enum] = fcurve
 
                 # Rotation quaternion for all animated bones (including root/hips)
-                data_path = f'pose.bones["{pose_bone.name}"].rotation_quaternion'
+                data_path = f'pose.bones["{escaped_bone_name}"].rotation_quaternion'
                 for fcurve_index_enum in [
                     FCurveIndexEnum.QUATERNION_ROTATION_W,
                     FCurveIndexEnum.QUATERNION_ROTATION_X,

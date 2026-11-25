@@ -1,8 +1,16 @@
 import os
 import pathlib
+import re
 import bpy
 
 from .auto_detect_lists.bones import bone_list, ignore_rokoko_retargeting_bones
+
+_POSE_BONE_PATH_RE = re.compile(
+    r'^pose\.bones\[(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\')\]'
+)
+_BONE_DELIMITERS_RE = re.compile(r'[_:\-\.\s/"\'\\|]+')
+_TRAILING_DELIM_RE = re.compile(r'[_:\-\.\s/"\'\\|]')
+_DIRECTIONAL_TOKENS = {"l", "r", "left", "right"}
 
 bone_detection_list = {}
 bone_detection_list_unmodified = {}
@@ -127,10 +135,6 @@ def standardize_bone_name(name):
     if len(name_split) > 1 and name_split[0].isdigit():
         name = name_split[1]
 
-    name_split = name.split('"')
-    if len(name_split) > 3:
-        name = name_split[1]
-
     if ":" in name:
         parts = name.split(":")
         name = "".join(parts[1:])
@@ -141,6 +145,159 @@ def standardize_bone_name(name):
         name = name[:-4]
 
     return name.lower()
+
+
+def extract_bone_name_from_data_path(data_path):
+    """
+    Safely extracts and unescapes the pose bone name from a Blender FCurve RNA data_path.
+    Handles quotes, backslashes, brackets, colons, spaces, and any special characters.
+    """
+    if not data_path:
+        return ""
+    match = _POSE_BONE_PATH_RE.match(data_path)
+    if not match:
+        return ""
+    raw_name = match.group(1) if match.group(1) is not None else match.group(2)
+    return re.sub(r'\\(.)', r'\1', raw_name)
+
+
+def iter_action_fcurves(armature):
+    """
+    Returns all FCurves for an armature's active Action, supporting both legacy
+    action.fcurves and Blender 4.4+/5.0 slotted Action channelbags.
+    """
+    if not armature or not armature.animation_data or not armature.animation_data.action:
+        return []
+
+    action = armature.animation_data.action
+    if hasattr(action, "fcurves"):
+        try:
+            fcurves = list(action.fcurves)
+            if fcurves:
+                return fcurves
+        except Exception:
+            pass
+
+    # Blender 4.4+/5.0 slotted Action fallback
+    if hasattr(action, "layers"):
+        slot = getattr(armature.animation_data, "action_slot", None)
+        collected = []
+        for layer in action.layers:
+            for strip in getattr(layer, "strips", []):
+                if slot is not None and hasattr(strip, "channelbag"):
+                    bag = strip.channelbag(slot)
+                    if bag and hasattr(bag, "fcurves"):
+                        collected.extend(bag.fcurves)
+                elif hasattr(strip, "channelbags"):
+                    for bag in strip.channelbags:
+                        if hasattr(bag, "fcurves"):
+                            collected.extend(bag.fcurves)
+        return collected
+
+    return []
+
+
+def _get_all_known_bone_values():
+    known = set()
+    for key, values in bone_detection_list.items():
+        known.add(key.lower())
+        for val in values:
+            known.add(val.lower())
+    return known
+
+
+def compute_common_bone_prefix(bone_names, known_bone_values=None):
+    """
+    Detects a shared skeleton/namespace prefix across bone names in an armature
+    (e.g. 'Kel1_TR25"a_', 'mixamorig:', 'Actor 1 - ', or even a delimiter-less
+    user prefix like 'Actor1' in 'Actor1Hips', 'Actor1Spine', 'Actor1LeftArm').
+    Never strips directional prefixes such as 'Left', 'Right', 'L_', or 'R_'.
+    """
+    valid_names = [n for n in bone_names if n]
+    if len(valid_names) < 2:
+        return ""
+
+    # 1. Count delimiter-terminated prefixes shared by a clear majority of bones
+    prefix_counts = {}
+    for name in valid_names:
+        seen_for_bone = set()
+        for match in _TRAILING_DELIM_RE.finditer(name):
+            end_idx = match.end()
+            if end_idx >= len(name):
+                continue
+            prefix = name[:end_idx]
+            if prefix in seen_for_bone:
+                continue
+            seen_for_bone.add(prefix)
+
+            # Avoid stripping directional prefixes (e.g. "L_", "Left_", "R_", "Right_")
+            tokens = [t.lower() for t in _BONE_DELIMITERS_RE.split(prefix) if t]
+            if not tokens or tokens[-1] in _DIRECTIONAL_TOKENS:
+                continue
+
+            prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+
+    min_count = len(valid_names) if len(valid_names) == 2 else max(3, int(len(valid_names) * 0.6))
+    best_delim_prefix = ""
+    for prefix, count in prefix_counts.items():
+        if count >= min_count and len(prefix) > len(best_delim_prefix):
+            best_delim_prefix = prefix
+
+    if best_delim_prefix:
+        return best_delim_prefix
+
+    # 2. Fallback for delimiter-less prefixes (e.g. 'Actor1Hips', 'Actor1Spine', 'Actor1LeftArm')
+    lcp = os.path.commonprefix(valid_names)
+    if lcp and lcp.lower() not in _DIRECTIONAL_TOKENS:
+        if known_bone_values is None:
+            known_bone_values = _get_all_known_bone_values()
+        matched_after_strip = 0
+        for name in valid_names:
+            remainder = name[len(lcp):]
+            if remainder and (
+                remainder.lower() in known_bone_values
+                or standardize_bone_name(remainder) in known_bone_values
+            ):
+                matched_after_strip += 1
+        if matched_after_strip >= min(3, len(valid_names)):
+            return lcp
+
+    return ""
+
+
+def build_bone_name_candidates(bone_name, common_prefix=""):
+    """
+    Generates ordered, deduplicated normalized candidate strings for matching
+    a bone name against bone_detection_list regardless of user prefix or punctuation.
+    """
+    candidates = []
+
+    def _add(val):
+        if val and val not in candidates:
+            candidates.append(val)
+
+    # 1. Highest priority: strip detected armature-wide common prefix
+    if common_prefix and bone_name.startswith(common_prefix):
+        stripped = bone_name[len(common_prefix):]
+        if stripped:
+            _add(stripped.lower())
+            _add(standardize_bone_name(stripped))
+
+    # 2. Direct & standardized forms
+    _add(bone_name.lower())
+    _add(standardize_bone_name(bone_name))
+
+    # 3. Progressive suffix candidates across all common delimiters
+    tokens = [t for t in _BONE_DELIMITERS_RE.split(bone_name) if t]
+    if len(tokens) > 1:
+        for idx in range(1, len(tokens)):
+            sub_under = "_".join(tokens[idx:])
+            _add(sub_under.lower())
+            _add(standardize_bone_name(sub_under))
+            sub_joined = "".join(tokens[idx:])
+            _add(sub_joined.lower())
+
+    return candidates
 
 
 def detect_bone(obj, bone_name_key, bone_name_source=None):
@@ -155,6 +312,8 @@ def detect_bone(obj, bone_name_key, bone_name_source=None):
 
     if not bone_name_source:
         bone_name_source = bone_name_key
+
+    target_prefix = compute_common_bone_prefix([b.name for b in obj.pose.bones])
 
     for bone in obj.pose.bones:
         if is_custom:
@@ -171,13 +330,7 @@ def detect_bone(obj, bone_name_key, bone_name_source=None):
             continue
 
         if bone_name_key in bone_detection_list:
-            target_candidates = [bone.name.lower(), standardize_bone_name(bone.name)]
-            if "_" in bone.name:
-                parts = bone.name.split("_")
-                for idx in range(1, len(parts)):
-                    sub = "_".join(parts[idx:])
-                    target_candidates.append(sub.lower())
-                    target_candidates.append(standardize_bone_name(sub))
+            target_candidates = build_bone_name_candidates(bone.name, target_prefix)
 
             for bone_name_detected in bone_detection_list[bone_name_key]:
                 if any(c == bone_name_detected for c in target_candidates):
@@ -221,27 +374,40 @@ def detect_retarget_bones():
     if not armature_source.animation_data or not armature_source.animation_data.action:
         return {}
 
-    for fc in armature_source.animation_data.action.fcurves:
-        bone_name = fc.data_path.split('"')
-        if len(bone_name) == 3 and bone_name[1] not in bone_list_animated:
-            bone_list_animated.append(bone_name[1])
+    source_fcurves = iter_action_fcurves(armature_source)
+    for fc in source_fcurves:
+        extracted_name = extract_bone_name_from_data_path(fc.data_path)
+        if extracted_name and extracted_name not in bone_list_animated:
+            bone_list_animated.append(extracted_name)
+
+    known_bone_values = _get_all_known_bone_values()
+    source_prefix = compute_common_bone_prefix(
+        bone_list_animated or [b.name for b in armature_source.pose.bones],
+        known_bone_values=known_bone_values,
+    )
+    target_prefix = compute_common_bone_prefix(
+        [b.name for b in armature_target.pose.bones],
+        known_bone_values=known_bone_values,
+    )
+
+    hip_values = bone_detection_list.get("hip", [])
 
     # If source armature has no explicit hip bone, check if the source object itself represents the hip
     has_source_hip_bone = False
     for b in bone_list_animated:
-        if standardize_bone_name(b) in bone_detection_list.get("hip", []):
+        b_candidates = build_bone_name_candidates(b, source_prefix)
+        if any(c in hip_values or c == "hip" for c in b_candidates):
             has_source_hip_bone = True
             break
 
     if not has_source_hip_bone:
-        std_obj_name = standardize_bone_name(armature_source.name)
+        obj_candidates = build_bone_name_candidates(armature_source.name, source_prefix)
         has_obj_anim = any(
             not fc.data_path.startswith("pose.bones")
-            for fc in armature_source.animation_data.action.fcurves
+            for fc in source_fcurves
         )
         if (
-            "hip" in std_obj_name
-            or std_obj_name in bone_detection_list.get("hip", [])
+            any("hip" in c or c in hip_values for c in obj_candidates)
             or has_obj_anim
         ):
             bone_list_animated.insert(0, armature_source.name)
@@ -265,15 +431,7 @@ def detect_retarget_bones():
 
         bone_item_source = bone_name
         main_bone_name = ""
-        standardized_bone_name_source = standardize_bone_name(bone_name)
-
-        candidates = [bone_name.lower(), standardized_bone_name_source]
-        if "_" in bone_name:
-            parts = bone_name.split("_")
-            for idx in range(1, len(parts)):
-                sub = "_".join(parts[idx:])
-                candidates.append(sub.lower())
-                candidates.append(standardize_bone_name(sub))
+        candidates = build_bone_name_candidates(bone_name, source_prefix)
 
         for bone_main, bone_values in bone_detection_list.items():
             if bone_main == "chest":
@@ -311,9 +469,10 @@ def detect_retarget_bones():
         )
         retargeting_dict[bone_item_source] = (bone_item_target, main_bone_name)
 
+    spine_values = bone_detection_list.get("spine", [])
     for bone in armature_target.pose.bones:
-        bone_name_standardized = standardize_bone_name(bone.name)
-        if bone_name_standardized in bone_detection_list.get("spine", []):
+        target_candidates = build_bone_name_candidates(bone.name, target_prefix)
+        if any(c in spine_values for c in target_candidates):
             spines_target.append(bone.name)
 
     if spines_target and spines_source:

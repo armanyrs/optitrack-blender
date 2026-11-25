@@ -398,7 +398,7 @@ class MOTIVE_OT_retarget_animation(Operator):
     def read_anim_start_end(self, armature):
         frame_start = None
         frame_end = None
-        for fcurve in armature.animation_data.action.fcurves:
+        for fcurve in detection_manager.iter_action_fcurves(armature):
             for key in fcurve.keyframe_points:
                 keyframe = key.co.x
                 if frame_start is None or keyframe < frame_start:
@@ -499,8 +499,8 @@ class MOTIVE_OT_retarget_animation(Operator):
             if fcurve.data_path.endswith("scale"):
                 continue
             if fcurve.data_path.endswith("location"):
-                bone_name = fcurve.data_path.split('"')
-                if len(bone_name) != 3 or bone_name[1] not in root_bones:
+                bone_name = detection_manager.extract_bone_name_from_data_path(fcurve.data_path)
+                if not bone_name or bone_name not in root_bones:
                     continue
 
             group_name = fcurve.group.name if fcurve.group else ""
