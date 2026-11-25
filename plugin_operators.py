@@ -9,6 +9,7 @@ import mathutils
 from bpy.types import Operator
 
 from .Modified_NatNetClient import NatNetClient
+from .diagnostics import NetworkTelemetry
 from .repository.action import ActionRepository
 from .repository.skeleton import SkeletonRepository
 
@@ -70,6 +71,10 @@ class ConnectionSetup:
             self.streaming_client.set_client_address(dict["clientAddress"])
             self.streaming_client.set_server_address(dict["serverAddress"])
             self.streaming_client.set_use_multicast(dict["use_multicast"])
+
+            NetworkTelemetry.server_ip = dict.get("serverAddress", "127.0.0.1")
+            NetworkTelemetry.client_ip = dict.get("clientAddress", "127.0.0.1")
+            NetworkTelemetry.use_multicast = dict.get("use_multicast", True)
 
             self.is_running = self.streaming_client.run()
 
@@ -202,13 +207,10 @@ class ConnectionSetup:
         return rot_transform
 
     def receive_data_frame(self, data_dict):
-<<<<<<< Updated upstream
-=======
         NetworkTelemetry.record_packet(data_dict)
         if self.streaming_client and self.streaming_client.desc_dict and not self.assets_motive:
             self.assets_motive = self.streaming_client.desc_dict
 
->>>>>>> Stashed changes
         self.indicate_model_changed = data_dict["tracked_models_changed"]
         self.indicate_motive_edit = data_dict["edit_mode"]
         frame_num = data_dict["frame_number"]
@@ -229,8 +231,6 @@ class ConnectionSetup:
                 # sequence -> (assetID, pos, rot, frame_num, assetType, ske_rb)
                 value = (b_id, pos1, rot1, frame_num, "rigid_body", None)
                 values.append(value)
-<<<<<<< Updated upstream
-=======
                 try:
                     desc_source = (
                         self.assets_motive
@@ -254,7 +254,6 @@ class ConnectionSetup:
                     )
                 except Exception:
                     pass
->>>>>>> Stashed changes
 
         for skeleton_id, frame_data in data_dict.get("ske_data", {}).items():
             skeleton_data = SkeletonRepository.get_by_id(skeleton_id=skeleton_id)

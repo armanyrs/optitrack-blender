@@ -203,11 +203,6 @@ class SkeletonData:
                 pass
 
             if not is_create_armature:
-<<<<<<< Updated upstream
-                # this ti for setting up transform_matrix
-                bpy.data.objects.remove(armature_object, do_unlink=True)
-                bpy.data.armatures.remove(armature, do_unlink=True)
-=======
                 # Used to initialize bone transform_matrix without keeping a scene object
                 if armature_object is not None:
                     bpy.data.objects.remove(armature_object, do_unlink=True)
@@ -219,7 +214,6 @@ class SkeletonData:
                             bpy.context.view_layer.objects.active = prev_active
                     except ReferenceError:
                         pass
->>>>>>> Stashed changes
 
     def create_frame_data(
         self,
@@ -358,8 +352,6 @@ class SkeletonData:
                         tpose_loc = Vector(bone_tpose_data.get("location_local", (0, 0, 0))) if bone_tpose_data else Vector((0, 0, 0))
                         pose_bone.location = tpose_loc + delta_bone_local
 
-<<<<<<< Updated upstream
-=======
                     try:
                         from ..diagnostics import NetworkTelemetry
                         mot_bname = animation_lists.CANONICAL_TO_MOTIVE.get(canonical_key, canonical_key)
@@ -375,7 +367,6 @@ class SkeletonData:
                     except Exception:
                         pass
 
->>>>>>> Stashed changes
             else:
                 # Native Motive armature pathway
                 if self.bones and 0 in self.bones and self.bones[0].transform_matrix is None:
@@ -408,8 +399,6 @@ class SkeletonData:
                             pose_bone.rotation_quaternion = bone.get_blender_frame_rot(
                                 frame_rot=frame_rot,
                             )
-<<<<<<< Updated upstream
-=======
                             try:
                                 from ..diagnostics import NetworkTelemetry
                                 canonical_key = animation_lists.EXTENDED_MOTIVE_TO_CANONICAL.get(
@@ -426,7 +415,6 @@ class SkeletonData:
                                 )
                             except Exception:
                                 pass
->>>>>>> Stashed changes
 
             if keyframe_num is not None:
                 ActionRepository.assign_action(object=object)
