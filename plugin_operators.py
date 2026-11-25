@@ -202,13 +202,9 @@ class ConnectionSetup:
         return rot_transform
 
     def receive_data_frame(self, data_dict):
-<<<<<<< Updated upstream
-=======
-        NetworkTelemetry.record_packet(data_dict)
         if self.streaming_client and self.streaming_client.desc_dict and not self.assets_motive:
             self.assets_motive = self.streaming_client.desc_dict
 
->>>>>>> Stashed changes
         self.indicate_model_changed = data_dict["tracked_models_changed"]
         self.indicate_motive_edit = data_dict["edit_mode"]
         frame_num = data_dict["frame_number"]
@@ -229,32 +225,6 @@ class ConnectionSetup:
                 # sequence -> (assetID, pos, rot, frame_num, assetType, ske_rb)
                 value = (b_id, pos1, rot1, frame_num, "rigid_body", None)
                 values.append(value)
-<<<<<<< Updated upstream
-=======
-                try:
-                    desc_source = (
-                        self.assets_motive
-                        or (self.streaming_client.desc_dict if self.streaming_client else {})
-                        or {}
-                    )
-                    rb_name = desc_source.get("rb_desc", {}).get(key1, {}).get("name", f"RigidBody_{key1}")
-                    b_obj_entry = self.rev_assets_blender.get(b_id, {})
-                    b_obj_name = b_obj_entry["obj"].name if "obj" in b_obj_entry and b_obj_entry["obj"] else f"Object_{b_id}"
-                    raw_p = mathutils.Vector(m_val["pos"])
-                    raw_r = m_val["rot"]
-                    raw_q = mathutils.Quaternion((raw_r[3], raw_r[0], raw_r[1], raw_r[2]))
-                    NetworkTelemetry.record_bone_mapping(
-                        canonical_name=f"rigid_body_{key1}",
-                        motive_name=f"{rb_name} (ID: {key1})",
-                        blender_bone=b_obj_name,
-                        raw_pos=raw_p,
-                        raw_quat=raw_q,
-                        blender_loc=mathutils.Vector(pos1),
-                        blender_quat=rot1,
-                    )
-                except Exception:
-                    pass
->>>>>>> Stashed changes
 
         for skeleton_id, frame_data in data_dict.get("ske_data", {}).items():
             skeleton_data = SkeletonRepository.get_by_id(skeleton_id=skeleton_id)
