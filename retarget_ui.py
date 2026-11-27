@@ -107,20 +107,50 @@ class VIEW3D_PT_motive_retarget(Panel):
         row.operator("motive.add_bone_list_item", text="Add Custom Entry", icon="ADD")
         row.operator("motive.remove_bone_list_item", text="Remove Selected", icon="REMOVE")
 
-        row = layout.row(align=True)
+        box_opts = layout.box()
+        row = box_opts.row(align=True)
         row.prop(context.scene, "motive_retargeting_auto_scaling")
+        row = box_opts.row(align=True)
+        row.prop(context.scene, "motive_retargeting_keep_target_position")
+        row = box_opts.row(align=True)
+        row.enabled = context.scene.motive_retargeting_keep_target_position
+        row.prop(context.scene, "motive_retargeting_align_facing")
 
-        row = layout.row(align=True)
+        row = box_opts.row(align=True)
         row.label(text="Use Pose:")
         row.prop(context.scene, "motive_retargeting_use_pose", expand=True)
 
-        row = layout.row(align=True)
-        row.scale_y = 1.4
-        row.operator(
-            "motive.retarget_animation",
-            text="Retarget Animation",
-            icon_value=IconsLoader.get_icon("Motive") if hasattr(IconsLoader, "get_icon") else 0,
-        )
+        armature_target = context.scene.motive_retargeting_armature_target
+        is_preview_linked = False
+        if armature_target and armature_target.type == "ARMATURE":
+            for pb in armature_target.pose.bones:
+                if any("_MOTIVE_RETARGET" in c.name for c in pb.constraints):
+                    is_preview_linked = True
+                    break
+
+        if is_preview_linked:
+            box_prev = layout.box()
+            row = box_prev.row(align=True)
+            row.label(text="Live Preview Active (Press Play)", icon="PLAY")
+            row = box_prev.row(align=True)
+            row.scale_y = 1.3
+            row.operator("motive.retarget_animation", text="Bake Animation", icon="REC")
+            row.operator("motive.unlink_retarget_preview", text="Unlink", icon="UNLINKED")
+        else:
+            row = layout.row(align=True)
+            row.scale_y = 1.2
+            row.operator(
+                "motive.link_retarget_preview",
+                text="Preview (Live Constraints)",
+                icon="CONSTRAINT_BONE",
+            )
+            row = layout.row(align=True)
+            row.scale_y = 1.4
+            row.operator(
+                "motive.retarget_animation",
+                text="Retarget & Bake",
+                icon_value=IconsLoader.get_icon("Motive") if hasattr(IconsLoader, "get_icon") else 0,
+            )
 
         self.draw_import_export(layout)
 

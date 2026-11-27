@@ -86,7 +86,17 @@ def register_properties():
     )
     Scene.motive_retargeting_auto_scaling = BoolProperty(
         name="Auto Scale",
-        description="Scale the source armature to fit the height of the target armature",
+        description="Scale retargeted root translation to match the height of the target armature",
+        default=True,
+    )
+    Scene.motive_retargeting_keep_target_position = BoolProperty(
+        name="Keep Target Position",
+        description="Keep the target armature at its own starting location (allows standing beside or away from the source armature)",
+        default=True,
+    )
+    Scene.motive_retargeting_align_facing = BoolProperty(
+        name="Align Target Facing",
+        description="Adapt motion direction to match the target character's facing orientation (allows retargeting at different Z rotations)",
         default=True,
     )
     Scene.motive_retargeting_use_pose = EnumProperty(
@@ -124,6 +134,8 @@ def unregister_properties():
         "motive_retargeting_armature_source",
         "motive_retargeting_armature_target",
         "motive_retargeting_auto_scaling",
+        "motive_retargeting_keep_target_position",
+        "motive_retargeting_align_facing",
         "motive_retargeting_use_pose",
         "motive_retargeting_bone_list",
         "motive_retargeting_bone_list_index",
