@@ -1,4 +1,5 @@
 import copy
+import math
 import os
 import time
 import bpy
@@ -11,6 +12,483 @@ from .core import animation_lists, custom_schemes_manager, detection_manager, ut
 from .retarget_properties import BoneListItem, get_source_armature, get_target_armature
 
 RETARGET_ID = "_MOTIVE_RETARGET"
+HELPER_SUFFIX = "_MOTIVE_RETARGET_HELPER"
+ANCHOR_PREFIX = "MotiveRetarget_Anchor_"
+
+
+def _orthonormalize_mat3(mat3):
+    """Returns a pure orthogonal rotation Matrix (3x3) free of scale/shear."""
+    return mat3.to_quaternion().to_matrix()
+
+
+def _is_target_linked(armature_target):
+    """Returns True if armature_target currently has live retarget preview constraints."""
+    if not armature_target or armature_target.type != "ARMATURE":
+        return False
+    for pb in armature_target.pose.bones:
+        if any(RETARGET_ID in c.name for c in pb.constraints):
+            return True
+    return False
+
+
+def _find_preview_objects(armature_target):
+    """Finds the helper armature and anchor Empty currently linked to armature_target."""
+    helper = None
+    if armature_target and armature_target.type == "ARMATURE":
+        for pb in armature_target.pose.bones:
+            for c in pb.constraints:
+                if RETARGET_ID in c.name and getattr(c, "target", None) is not None:
+                    helper = c.target
+                    break
+            if helper is not None:
+                break
+    anchor = None
+    if helper is not None and helper.parent is not None:
+        if helper.parent.name.startswith(ANCHOR_PREFIX) or helper.parent.get("motive_retarget_anchor"):
+            anchor = helper.parent
+    return helper, anchor
+
+
+def _cleanup_retarget_link(armature_target, reset_pose=False):
+    """Removes all live retarget constraints on target and deletes helper armature + anchor."""
+    helper, anchor = _find_preview_objects(armature_target)
+
+    if armature_target and armature_target.type == "ARMATURE":
+        for pb in armature_target.pose.bones:
+            for c in list(pb.constraints):
+                if RETARGET_ID in c.name:
+                    pb.constraints.remove(c)
+            if reset_pose:
+                pb.location = (0.0, 0.0, 0.0)
+                pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+                pb.rotation_euler = (0.0, 0.0, 0.0)
+                pb.scale = (1.0, 1.0, 1.0)
+
+    if helper is not None:
+        helper_data = helper.data if helper.type == "ARMATURE" else None
+        try:
+            bpy.data.objects.remove(helper, do_unlink=True)
+        except ReferenceError:
+            pass
+        if helper_data is not None and helper_data.users == 0:
+            try:
+                bpy.data.armatures.remove(helper_data)
+            except ReferenceError:
+                pass
+
+    if anchor is not None:
+        try:
+            bpy.data.objects.remove(anchor, do_unlink=True)
+        except ReferenceError:
+            pass
+
+
+def _read_anim_start_end(armature):
+    frame_start = None
+    frame_end = None
+    for fcurve in detection_manager.iter_action_fcurves(armature):
+        for key in fcurve.keyframe_points:
+            keyframe = key.co.x
+            if frame_start is None or keyframe < frame_start:
+                frame_start = keyframe
+            if frame_end is None or keyframe > frame_end:
+                frame_end = keyframe
+    return frame_start if frame_start is not None else 1, frame_end if frame_end is not None else 250
+
+
+def _find_root_bones(armature_target, retarget_bone_list):
+    root_bones = [b for b in armature_target.pose.bones if not b.parent]
+    root_bones_animated = []
+    target_bones = [item.bone_name_target for item in retarget_bone_list]
+    while root_bones:
+        for bone in list(root_bones):
+            root_bones.remove(bone)
+            if bone.name in target_bones:
+                root_bones_animated.append(bone.name)
+            else:
+                for bone_child in bone.children:
+                    root_bones.append(bone_child)
+    return root_bones_animated
+
+
+def _get_source_item_world_head(armature_source, bone_name_source, use_pose=True):
+    pb = armature_source.pose.bones.get(bone_name_source)
+    if pb is not None:
+        return armature_source.matrix_world @ (pb.head if use_pose else pb.bone.head_local)
+    if bone_name_source == armature_source.name:
+        return armature_source.matrix_world.translation.copy()
+    return None
+
+
+def _compute_scale_factor(armature_source, armature_target, retarget_bone_list, root_bones):
+    source_min = None
+    source_min_root = None
+    target_min = None
+    target_min_root = None
+
+    for item in retarget_bone_list:
+        bone_target = armature_target.pose.bones.get(item.bone_name_target)
+        if not bone_target:
+            continue
+
+        src_head = _get_source_item_world_head(armature_source, item.bone_name_source, use_pose=True)
+        if src_head is None:
+            continue
+
+        bone_source_z = src_head.z
+        bone_target_z = (armature_target.matrix_world @ bone_target.head).z
+
+        if item.bone_name_target in root_bones:
+            if source_min_root is None or source_min_root > bone_source_z:
+                source_min_root = bone_source_z
+            if target_min_root is None or target_min_root > bone_target_z:
+                target_min_root = bone_target_z
+
+        if source_min is None or source_min > bone_source_z:
+            source_min = bone_source_z
+        if target_min is None or target_min > bone_target_z:
+            target_min = bone_target_z
+
+    if (
+        source_min_root is None
+        or source_min is None
+        or target_min_root is None
+        or target_min is None
+    ):
+        return 1.0
+
+    source_height = source_min_root - source_min
+    target_height = target_min_root - target_min
+    if abs(source_height) < 1e-4 or abs(target_height) < 1e-4:
+        return 1.0
+
+    ratio = target_height / source_height
+    return ratio if ratio > 0.0 else 1.0
+
+
+def _compute_horizontal_yaw_delta(armature_source, armature_target, retarget_bone_list):
+    """
+    Computes the signed World-Z yaw angle from Source's facing orientation to
+    Target's facing orientation using symmetric left/right bone pairs (arms, shoulders, legs).
+    Returns 0.0 if no symmetric pair is mapped or vectors are degenerate.
+    """
+    by_key = {
+        item.bone_name_key: item
+        for item in retarget_bone_list
+        if item.bone_name_key
+    }
+    symmetric_pairs = [
+        ("leftUpperArm", "rightUpperArm"),
+        ("leftShoulder", "rightShoulder"),
+        ("leftUpLeg", "rightUpLeg"),
+        ("leftLowerArm", "rightLowerArm"),
+        ("leftLeg", "rightLeg"),
+    ]
+    for left_key, right_key in symmetric_pairs:
+        if left_key not in by_key or right_key not in by_key:
+            continue
+        l_item = by_key[left_key]
+        r_item = by_key[right_key]
+
+        src_l = _get_source_item_world_head(armature_source, l_item.bone_name_source, use_pose=True)
+        src_r = _get_source_item_world_head(armature_source, r_item.bone_name_source, use_pose=True)
+        pb_tl = armature_target.pose.bones.get(l_item.bone_name_target)
+        pb_tr = armature_target.pose.bones.get(r_item.bone_name_target)
+        if src_l is None or src_r is None or pb_tl is None or pb_tr is None:
+            continue
+
+        tgt_l = armature_target.matrix_world @ pb_tl.head
+        tgt_r = armature_target.matrix_world @ pb_tr.head
+
+        v_src = mathutils.Vector((src_l.x - src_r.x, src_l.y - src_r.y))
+        v_tgt = mathutils.Vector((tgt_l.x - tgt_r.x, tgt_l.y - tgt_r.y))
+        if v_src.length < 1e-4 or v_tgt.length < 1e-4:
+            continue
+
+        ang_src = math.atan2(v_src.y, v_src.x)
+        ang_tgt = math.atan2(v_tgt.y, v_tgt.x)
+        delta = ang_tgt - ang_src
+        # Normalize to [-pi, pi]
+        return math.atan2(math.sin(delta), math.cos(delta))
+
+    return 0.0
+
+
+def _reset_armature_pose(armature):
+    for pb in armature.pose.bones:
+        pb.location = (0.0, 0.0, 0.0)
+        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        pb.rotation_euler = (0.0, 0.0, 0.0)
+        pb.scale = (1.0, 1.0, 1.0)
+
+
+def _save_armature_pose(armature):
+    saved = {}
+    for pb in armature.pose.bones:
+        saved[pb.name] = (
+            pb.location.copy(),
+            pb.rotation_quaternion.copy(),
+            pb.rotation_euler.copy(),
+            pb.scale.copy(),
+        )
+    return saved
+
+
+def _restore_armature_pose(armature, saved):
+    for name, (loc, q, e, sc) in saved.items():
+        pb = armature.pose.bones.get(name)
+        if pb is not None:
+            pb.location = loc
+            pb.rotation_quaternion = q
+            pb.rotation_euler = e
+            pb.scale = sc
+
+
+def _collect_valid_bone_list(context, armature_source, armature_target):
+    retarget_bone_list = []
+    for item in context.scene.motive_retargeting_bone_list:
+        if not item.bone_name_source or not item.bone_name_target:
+            continue
+        source_is_obj = item.bone_name_source == armature_source.name
+        if not source_is_obj and not armature_source.pose.bones.get(item.bone_name_source):
+            continue
+        if not armature_target.pose.bones.get(item.bone_name_target):
+            continue
+        retarget_bone_list.append(item)
+    return retarget_bone_list
+
+
+def _build_retarget_link(context, armature_source, armature_target, retarget_bone_list, root_bones):
+    """
+    Creates an offset-independent, zero-lever-arm retargeting rig consisting of:
+      1. An Anchor Empty applying A = T(P_tgt_0) @ Rz(delta_yaw) @ S(scale_factor) @ T(-P_src_0)
+      2. A hidden Helper Armature parented to Anchor that tracks Source's exact object + local pose
+         and carries rest-axis-aligned helper bones placed directly at each source bone's pivot (zero lever arm).
+      3. COPY_ROTATION (all mapped bones) and COPY_LOCATION (root bones) constraints on Target.
+    """
+    _cleanup_retarget_link(armature_target, reset_pose=False)
+
+    scene = context.scene
+    orig_frame = scene.frame_current
+    orig_src_action = armature_source.animation_data.action if armature_source.animation_data else None
+    orig_src_slot = (
+        getattr(armature_source.animation_data, "action_slot", None)
+        if armature_source.animation_data
+        else None
+    )
+    use_rest = scene.motive_retargeting_use_pose == "REST"
+    keep_target_pos = getattr(scene, "motive_retargeting_keep_target_position", True)
+    align_facing = getattr(scene, "motive_retargeting_align_facing", True) and keep_target_pos
+    auto_scale = getattr(scene, "motive_retargeting_auto_scaling", True)
+
+    primary_root_item = None
+    for item in retarget_bone_list:
+        if item.bone_name_target in root_bones:
+            primary_root_item = item
+            break
+
+    # 1. Measure source root world position at frame_start (with animation active)
+    frame_start, _ = _read_anim_start_end(armature_source)
+    scene.frame_set(int(frame_start))
+    context.view_layer.update()
+    p_src_start = (
+        _get_source_item_world_head(armature_source, primary_root_item.bone_name_source, use_pose=True)
+        if primary_root_item
+        else armature_source.matrix_world.translation.copy()
+    )
+
+    saved_src_pose = _save_armature_pose(armature_source)
+    saved_tgt_pose = _save_armature_pose(armature_target)
+
+    try:
+        # 2. Evaluate clean reference pose (REST or CURRENT)
+        armature_source.data.pose_position = "POSE"
+        armature_target.data.pose_position = "POSE"
+
+        if use_rest:
+            if armature_source.animation_data:
+                armature_source.animation_data.action = None
+            _reset_armature_pose(armature_source)
+            _reset_armature_pose(armature_target)
+            context.view_layer.update()
+
+        m_src_ref = armature_source.matrix_world.copy()
+        m_tgt_ref = armature_target.matrix_world.copy()
+
+        # Reference root positions
+        p_src_rest = (
+            _get_source_item_world_head(armature_source, primary_root_item.bone_name_source, use_pose=True)
+            if primary_root_item
+            else m_src_ref.translation.copy()
+        )
+        if primary_root_item and armature_target.pose.bones.get(primary_root_item.bone_name_target):
+            pb_tgt_root = armature_target.pose.bones[primary_root_item.bone_name_target]
+            p_tgt_rest = m_tgt_ref @ pb_tgt_root.head
+        else:
+            p_tgt_rest = m_tgt_ref.translation.copy()
+
+        # Scale factor & facing yaw alignment
+        scale_factor = (
+            _compute_scale_factor(armature_source, armature_target, retarget_bone_list, root_bones)
+            if auto_scale
+            else 1.0
+        )
+        delta_yaw = (
+            _compute_horizontal_yaw_delta(armature_source, armature_target, retarget_bone_list)
+            if align_facing
+            else 0.0
+        )
+
+        # Build exact rigid + uniform-scale alignment matrix A:
+        #   A @ P = P_tgt_0 + scale_factor * Rz(delta_yaw) @ (P - P_src_0)
+        if keep_target_pos:
+            p_src_0 = mathutils.Vector((p_src_start.x, p_src_start.y, p_src_rest.z))
+            p_tgt_0 = p_tgt_rest.copy()
+        else:
+            p_src_0 = mathutils.Vector((0.0, 0.0, p_src_rest.z))
+            p_tgt_0 = mathutils.Vector((0.0, 0.0, p_tgt_rest.z))
+
+        mat_align = (
+            mathutils.Matrix.Translation(p_tgt_0)
+            @ mathutils.Matrix.Rotation(delta_yaw, 4, "Z")
+            @ mathutils.Matrix.Scale(scale_factor, 4)
+            @ mathutils.Matrix.Translation(-p_src_0)
+        )
+
+        # Capture reference bone transforms while in reference pose
+        m_helper_ref = mat_align @ m_src_ref
+        m_helper_ref_rot_inv = _orthonormalize_mat3(m_helper_ref.to_3x3()).inverted()
+
+        bone_ref_specs = {}
+        for item in retarget_bone_list:
+            pb_tgt = armature_target.pose.bones.get(item.bone_name_target)
+            if not pb_tgt:
+                continue
+            r_tgt_world = _orthonormalize_mat3((m_tgt_ref @ pb_tgt.matrix).to_3x3())
+
+            pb_src = armature_source.pose.bones.get(item.bone_name_source)
+            if pb_src is not None:
+                m_src_bone_eval = _orthonormalize_mat3(pb_src.matrix.to_3x3())
+                m_src_bone_rest = _orthonormalize_mat3(pb_src.bone.matrix_local.to_3x3())
+                m_delta = m_src_bone_rest @ m_src_bone_eval.inverted()
+                r_new_rest = _orthonormalize_mat3(m_delta @ m_helper_ref_rot_inv @ r_tgt_world)
+                bone_ref_specs[item.bone_name_target] = (item.bone_name_source, r_new_rest)
+            else:
+                # Source root is the Armature object itself
+                r_new_rest = _orthonormalize_mat3(m_helper_ref_rot_inv @ r_tgt_world)
+                bone_ref_specs[item.bone_name_target] = (None, r_new_rest)
+
+        # 3. Create Anchor Empty
+        target_collection = (
+            armature_target.users_collection[0]
+            if armature_target.users_collection
+            else context.collection
+        )
+        anchor = bpy.data.objects.new(ANCHOR_PREFIX + armature_target.name, None)
+        anchor.empty_display_type = "ARROWS"
+        anchor.empty_display_size = 0.25
+        anchor.matrix_world = mat_align
+        anchor.hide_render = True
+        anchor["motive_retarget_anchor"] = True
+        target_collection.objects.link(anchor)
+
+        # 4. Create clean Helper Armature (no copied Action — driven live by Source)
+        helper_data = armature_source.data.copy()
+        helper_data.name = armature_source.data.name + HELPER_SUFFIX
+        armature_helper = bpy.data.objects.new(armature_target.name + HELPER_SUFFIX, helper_data)
+        target_collection.objects.link(armature_helper)
+        armature_helper.parent = anchor
+        armature_helper.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+        armature_helper.matrix_local = m_src_ref
+        armature_helper.hide_render = True
+        armature_helper["motive_retarget_source"] = armature_source.name
+        armature_helper["motive_retarget_target"] = armature_target.name
+
+        # Object-level tracking: M_helper_world(t) = A @ M_src_world(t)
+        obj_con = armature_helper.constraints.new("COPY_TRANSFORMS")
+        obj_con.name = "MotiveSourceTrack" + RETARGET_ID
+        obj_con.target = armature_source
+        obj_con.target_space = "WORLD"
+        obj_con.owner_space = "LOCAL"
+
+        orig_bone_names = [b.name for b in armature_source.pose.bones]
+
+        # 5. Add zero-lever-arm helper bones inside Helper Armature Edit Mode
+        bpy.ops.object.select_all(action="DESELECT")
+        utils.set_active(armature_helper)
+        bpy.ops.object.mode_set(mode="EDIT")
+
+        for tgt_bone_name, (src_bone_name, r_new_rest) in bone_ref_specs.items():
+            eb_src = armature_helper.data.edit_bones.get(src_bone_name) if src_bone_name else None
+            eb_new = armature_helper.data.edit_bones.new(tgt_bone_name + RETARGET_ID)
+
+            # Place helper bone directly at Source pivot (ZERO lever arm!)
+            if eb_src is not None:
+                head_loc = eb_src.head.copy()
+                bone_len = eb_src.length if eb_src.length > 1e-4 else 0.1
+            else:
+                head_loc = mathutils.Vector((0.0, 0.0, 0.0))
+                bone_len = 0.1
+
+            y_axis = r_new_rest.col[1].normalized()
+            eb_new.head = head_loc
+            eb_new.tail = head_loc + y_axis * bone_len
+            eb_new.roll = utils.mat3_to_vec_roll(r_new_rest)
+            eb_new.parent = eb_src  # None when source_is_obj
+
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        context.view_layer.update()
+
+        # PoseBone-level tracking: mirror Source's exact local pose onto Helper's original bones
+        for bname in orig_bone_names:
+            pb_h = armature_helper.pose.bones.get(bname)
+            if pb_h is None:
+                continue
+            con = pb_h.constraints.new("COPY_TRANSFORMS")
+            con.name = "MotivePoseTrack" + RETARGET_ID
+            con.target = armature_source
+            con.subtarget = bname
+            con.target_space = "LOCAL"
+            con.owner_space = "LOCAL"
+
+        # Hide helper armature in viewport (eye icon only so depsgraph still evaluates it)
+        armature_helper.hide_set(True)
+        anchor.hide_set(True)
+
+    finally:
+        # Always restore source action, poses, and timeline frame
+        if armature_source.animation_data:
+            armature_source.animation_data.action = orig_src_action
+            if orig_src_slot is not None and hasattr(armature_source.animation_data, "action_slot"):
+                try:
+                    armature_source.animation_data.action_slot = orig_src_slot
+                except Exception:
+                    pass
+        if not use_rest:
+            _restore_armature_pose(armature_source, saved_src_pose)
+            _restore_armature_pose(armature_target, saved_tgt_pose)
+        scene.frame_set(orig_frame)
+
+    # 6. Attach live constraints onto Target Armature
+    for item in retarget_bone_list:
+        bone_target = armature_target.pose.bones.get(item.bone_name_target)
+        if not bone_target:
+            continue
+
+        c_rot = bone_target.constraints.new("COPY_ROTATION")
+        c_rot.name += RETARGET_ID
+        c_rot.target = armature_helper
+        c_rot.subtarget = item.bone_name_target + RETARGET_ID
+
+        if bone_target.name in root_bones:
+            c_loc = bone_target.constraints.new("COPY_LOCATION")
+            c_loc.name += RETARGET_ID
+            c_loc.target = armature_helper
+            c_loc.subtarget = item.bone_name_target + RETARGET_ID
+
+    context.view_layer.update()
+    return armature_helper, anchor
 
 
 def _select_pose_bone(armature, bone_name, state=True):
@@ -181,12 +659,102 @@ class MOTIVE_OT_clear_bone_list(Operator):
         return {"FINISHED"}
 
 
+class MOTIVE_OT_link_retarget_preview(Operator):
+    """Links live offset-independent retargeting constraints so you can preview motion before baking."""
+
+    bl_idname = "motive.link_retarget_preview"
+    bl_label = "Preview (Live Constraints)"
+    bl_description = "Link non-destructive retargeting constraints to preview animation at the target's own position before baking"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        armature_source = get_source_armature()
+        armature_target = get_target_armature()
+
+        if not armature_source or not armature_source.animation_data or not armature_source.animation_data.action:
+            self.report(
+                {"ERROR"},
+                "No animation found on source armature!\nSelect an armature with animation as source.",
+            )
+            return {"CANCELLED"}
+
+        if not armature_target:
+            self.report({"ERROR"}, "Please select a target armature.")
+            return {"CANCELLED"}
+
+        if armature_source.name == armature_target.name:
+            self.report({"ERROR"}, "Source and target armature are the same!")
+            return {"CANCELLED"}
+
+        retarget_bone_list = _collect_valid_bone_list(context, armature_source, armature_target)
+        if not retarget_bone_list:
+            self.report(
+                {"ERROR"},
+                "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
+            )
+            return {"CANCELLED"}
+
+        root_bones = _find_root_bones(armature_target, retarget_bone_list)
+        if not root_bones:
+            self.report(
+                {"ERROR"},
+                "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
+            )
+            return {"CANCELLED"}
+
+        seen = {}
+        for item in retarget_bone_list:
+            seen[item.bone_name_target] = seen.get(item.bone_name_target, 0) + 1
+        duplicates = [k for k, v in seen.items() if v > 1]
+        if duplicates:
+            self.report(
+                {"ERROR"},
+                f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
+            )
+            return {"CANCELLED"}
+
+        if context.active_object and context.active_object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        _build_retarget_link(context, armature_source, armature_target, retarget_bone_list, root_bones)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        utils.set_active(armature_target)
+        self.report({"INFO"}, "Live retarget preview linked! Press Play to inspect, then click Bake Animation or Unlink.")
+        return {"FINISHED"}
+
+
+class MOTIVE_OT_unlink_retarget_preview(Operator):
+    """Removes live retargeting preview constraints and cleans up temporary helper objects."""
+
+    bl_idname = "motive.unlink_retarget_preview"
+    bl_label = "Unlink Preview"
+    bl_description = "Remove live retargeting preview constraints and helper rig without baking"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        armature_target = get_target_armature()
+        if not armature_target:
+            self.report({"WARNING"}, "No target armature selected.")
+            return {"CANCELLED"}
+
+        if context.active_object and context.active_object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        _cleanup_retarget_link(armature_target, reset_pose=True)
+        bpy.ops.object.select_all(action="DESELECT")
+        utils.set_active(armature_target)
+        context.view_layer.update()
+        self.report({"INFO"}, "Retarget preview unlinked and helper rig cleaned up.")
+        return {"FINISHED"}
+
+
 class MOTIVE_OT_retarget_animation(Operator):
-    """Retargets the offline FBX/BVH animation from the source armature to the target character."""
+    """Retargets (or bakes an active live preview of) the offline FBX/BVH animation onto the target character."""
 
     bl_idname = "motive.retarget_animation"
     bl_label = "Retarget Animation"
-    bl_description = "Retargets the animation from the source armature to the target armature"
+    bl_description = "Retargets and bakes the animation from the source armature to the target armature"
     bl_options = {"REGISTER", "UNDO"}
 
     retarget_bone_list: list = []
@@ -210,171 +778,91 @@ class MOTIVE_OT_retarget_animation(Operator):
             self.report({"ERROR"}, "Source and target armature are the same!")
             return {"CANCELLED"}
 
-        # Build retargeting bone list
-        self.retarget_bone_list = []
-        for item in context.scene.motive_retargeting_bone_list:
-            if not item.bone_name_source or not item.bone_name_target:
-                continue
-            source_is_obj = (item.bone_name_source == armature_source.name)
-            if not source_is_obj and not armature_source.pose.bones.get(item.bone_name_source):
-                continue
-            if not armature_target.pose.bones.get(item.bone_name_target):
-                continue
-            self.retarget_bone_list.append(item)
+        if context.active_object and context.active_object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
 
-        if not self.retarget_bone_list:
-            self.report(
-                {"ERROR"},
-                "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
-            )
-            return {"CANCELLED"}
+        was_preview_linked = _is_target_linked(armature_target)
 
-        # Find the root bones
-        root_bones = self.find_root_bones(armature_target)
-        if not root_bones:
-            self.report(
-                {"ERROR"},
-                "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
-            )
-            return {"CANCELLED"}
+        if was_preview_linked:
+            # Bake directly from active live preview constraints (preserves any live anchor adjustments)
+            target_bones_to_bake = []
+            root_bones = []
+            for pb in armature_target.pose.bones:
+                has_rot = any(RETARGET_ID in c.name and c.type == "COPY_ROTATION" for c in pb.constraints)
+                has_loc = any(RETARGET_ID in c.name and c.type == "COPY_LOCATION" for c in pb.constraints)
+                if has_rot or has_loc:
+                    target_bones_to_bake.append(pb.name)
+                if has_loc:
+                    root_bones.append(pb.name)
+            if not target_bones_to_bake:
+                self.report({"ERROR"}, "No active retarget preview constraints found on target armature.")
+                return {"CANCELLED"}
+        else:
+            # Build retargeting bone list
+            self.retarget_bone_list = _collect_valid_bone_list(context, armature_source, armature_target)
+            if not self.retarget_bone_list:
+                self.report(
+                    {"ERROR"},
+                    "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
+                )
+                return {"CANCELLED"}
 
-        # Check for duplicate target bone entries
-        seen = {}
-        for item in self.retarget_bone_list:
-            count = seen.get(item.bone_name_target, 0)
-            seen[item.bone_name_target] = count + 1
-        duplicates = [k for k, v in seen.items() if v > 1]
-        if duplicates:
-            self.report(
-                {"ERROR"},
-                f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
-            )
-            return {"CANCELLED"}
+            # Find the root bones
+            root_bones = _find_root_bones(armature_target, self.retarget_bone_list)
+            if not root_bones:
+                self.report(
+                    {"ERROR"},
+                    "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
+                )
+                return {"CANCELLED"}
 
-        # Save custom schemes if user adjusted mappings
-        custom_schemes_manager.save_retargeting_to_list()
+            # Check for duplicate target bone entries
+            seen = {}
+            for item in self.retarget_bone_list:
+                seen[item.bone_name_target] = seen.get(item.bone_name_target, 0) + 1
+            duplicates = [k for k, v in seen.items() if v > 1]
+            if duplicates:
+                self.report(
+                    {"ERROR"},
+                    f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
+                )
+                return {"CANCELLED"}
 
-        # Prepare armatures
-        utils.set_active(armature_target)
-        bpy.ops.object.mode_set(mode="OBJECT")
-        utils.set_active(armature_source)
-        bpy.ops.object.mode_set(mode="OBJECT")
+            # Save custom schemes if user adjusted mappings
+            custom_schemes_manager.save_retargeting_to_list()
 
-        armature_source.data.pose_position = "POSE"
-        armature_target.data.pose_position = "POSE"
+            # Build offset-independent zero-lever-arm link
+            _build_retarget_link(context, armature_source, armature_target, self.retarget_bone_list, root_bones)
+            target_bones_to_bake = [item.bone_name_target for item in self.retarget_bone_list]
 
-        if context.scene.motive_retargeting_use_pose == "REST":
-            self.get_and_reset_pose_rotations(armature_source)
-            self.get_and_reset_pose_rotations(armature_target)
-
-        # Auto scaling
-        source_scale = None
-        if context.scene.motive_retargeting_auto_scaling:
-            self.clean_animation(armature_source)
-            source_scale = copy.deepcopy(armature_source.scale)
-            self.scale_armature(armature_source, armature_target, root_bones)
-
-        # Duplicate source armature
-        armature_source_original = armature_source
-        armature_source = self.copy_rest_pose(context, armature_source)
-
-        # Save target transforms
         rotation_mode = armature_target.rotation_mode
 
-        # Calculate target bone rest transforms relative to source armature without transform_apply
-        bone_transforms = {}
-        for item in self.retarget_bone_list:
-            bone = armature_target.data.bones.get(item.bone_name_target)
-            if not bone:
-                continue
-            head_world = armature_target.matrix_world @ bone.head_local
-            tail_world = armature_target.matrix_world @ bone.tail_local
-            head_loc = armature_source.matrix_world.inverted() @ head_world
-            tail_loc = armature_source.matrix_world.inverted() @ tail_world
-            mat_world = armature_target.matrix_world.to_3x3() @ bone.matrix_local.to_3x3()
-            roll = utils.mat3_to_vec_roll(
-                armature_source.matrix_world.inverted().to_3x3() @ mat_world
-            )
-            bone_transforms[item.bone_name_target] = (head_loc, tail_loc, roll)
+        try:
+            # Select ONLY mapped bones on target armature for clean baking
+            for pb in armature_target.pose.bones:
+                _select_pose_bone(armature_target, pb.name, False)
+            for bname in target_bones_to_bake:
+                _select_pose_bone(armature_target, bname, True)
 
-        bpy.ops.object.select_all(action="DESELECT")
-        utils.set_active(armature_source)
-        bpy.ops.object.mode_set(mode="EDIT")
+            # Bake animation driven by live helper constraints
+            self.bake_animation(armature_source, armature_target, root_bones)
 
-        # Recreate target bones inside source armature
-        for item in self.retarget_bone_list:
-            bone_source = armature_source.data.edit_bones.get(item.bone_name_source)
-            bone_new = armature_source.data.edit_bones.new(item.bone_name_target + RETARGET_ID)
-            bone_new.head, bone_new.tail, bone_new.roll = bone_transforms[item.bone_name_target]
-            if bone_source:
-                bone_new.parent = bone_source
-            else:
-                bone_new.parent = None
-
-        bpy.ops.object.mode_set(mode="OBJECT")
-        bpy.ops.object.select_all(action="DESELECT")
-
-        # Constraints inside duplicate helper for bones whose source is the root object
-        for item in self.retarget_bone_list:
-            if item.bone_name_source == armature_source_original.name:
-                pb = armature_source.pose.bones.get(item.bone_name_target + RETARGET_ID)
-                if pb:
-                    c = pb.constraints.new("COPY_ROTATION")
-                    c.target = armature_source_original
-
-        # Add constraints to target armature
-        for item in self.retarget_bone_list:
-            bone_target = armature_target.pose.bones.get(item.bone_name_target)
-
-            constraint = bone_target.constraints.new("COPY_ROTATION")
-            constraint.name += RETARGET_ID
-            constraint.target = armature_source
-            constraint.subtarget = item.bone_name_target + RETARGET_ID
-
-            if bone_target.name in root_bones:
-                constraint = bone_target.constraints.new("COPY_LOCATION")
-                constraint.name += RETARGET_ID
-                constraint.target = armature_source
-                constraint.subtarget = item.bone_name_target + RETARGET_ID
-
-            _select_pose_bone(armature_target, item.bone_name_target, True)
-
-        # Bake animation
-        self.bake_animation(armature_source, armature_target, root_bones)
-
-        # Delete duplicate helper armature
-        bpy.ops.object.select_all(action="DESELECT")
-        utils.set_active(armature_source)
-        if armature_source.animation_data and armature_source.animation_data.action:
-            bpy.data.actions.remove(armature_source.animation_data.action)
-        bpy.ops.object.delete()
-
-        armature_source = armature_source_original
-
-        # Rename action
-        if armature_target.animation_data and armature_target.animation_data.action:
-            src_action_name = (
-                armature_source.animation_data.action.name
-                if (armature_source.animation_data and armature_source.animation_data.action)
-                else "Motive"
-            )
-            armature_target.animation_data.action.name = src_action_name + " Retarget"
-
-        # Remove constraints from target armature
-        for bone in armature_target.pose.bones:
-            for constraint in list(bone.constraints):
-                if RETARGET_ID in constraint.name:
-                    bone.constraints.remove(constraint)
+            # Rename baked action
+            if armature_target.animation_data and armature_target.animation_data.action:
+                src_action_name = (
+                    armature_source.animation_data.action.name
+                    if (armature_source.animation_data and armature_source.animation_data.action)
+                    else "Motive"
+                )
+                armature_target.animation_data.action.name = src_action_name + " Retarget"
+        finally:
+            # Always clean up temporary helper armature, anchor, and constraints
+            _cleanup_retarget_link(armature_target, reset_pose=False)
+            armature_target.rotation_mode = rotation_mode
 
         bpy.ops.object.select_all(action="DESELECT")
         utils.set_active(armature_target)
-
-        armature_target.rotation_mode = rotation_mode
-
-        if source_scale:
-            armature_source.scale = source_scale
-
-        bpy.ops.object.select_all(action="DESELECT")
+        context.view_layer.update()
         self.report({"INFO"}, "Successfully retargeted animation!")
         return {"FINISHED"}
 
