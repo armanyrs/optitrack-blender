@@ -78,13 +78,11 @@ def register():
         # Retargeting UIList and Panel (3D Viewport N-Panel)
         retarget_ui.MOTIVE_UL_BoneList,
         retarget_ui.VIEW3D_PT_motive_retarget,
-        # Offline Retargeting Operators (FBX/BVH Preview & Baking)
+        # Offline Retargeting Operators (FBX/BVH Baking)
         retarget_operators.MOTIVE_OT_build_bone_list,
         retarget_operators.MOTIVE_OT_add_bone_list_item,
         retarget_operators.MOTIVE_OT_remove_bone_list_item,
         retarget_operators.MOTIVE_OT_clear_bone_list,
-        retarget_operators.MOTIVE_OT_link_retarget_preview,
-        retarget_operators.MOTIVE_OT_unlink_retarget_preview,
         retarget_operators.MOTIVE_OT_retarget_animation,
         # Realtime Retargeting Operators (Object Properties & Schemes)
         retarget_operators.MOTIVE_OT_init_tpose,
