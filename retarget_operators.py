@@ -21,16 +21,6 @@ def _orthonormalize_mat3(mat3):
     return mat3.to_quaternion().to_matrix()
 
 
-def _is_target_linked(armature_target):
-    """Returns True if armature_target currently has live retarget preview constraints."""
-    if not armature_target or armature_target.type != "ARMATURE":
-        return False
-    for pb in armature_target.pose.bones:
-        if any(RETARGET_ID in c.name for c in pb.constraints):
-            return True
-    return False
-
-
 def _find_preview_objects(armature_target):
     """Finds the helper armature and anchor Empty currently linked to armature_target."""
     helper = None
@@ -659,98 +649,8 @@ class MOTIVE_OT_clear_bone_list(Operator):
         return {"FINISHED"}
 
 
-class MOTIVE_OT_link_retarget_preview(Operator):
-    """Links live offset-independent retargeting constraints so you can preview motion before baking."""
-
-    bl_idname = "motive.link_retarget_preview"
-    bl_label = "Preview (Live Constraints)"
-    bl_description = "Link non-destructive retargeting constraints to preview animation at the target's own position before baking"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        armature_source = get_source_armature()
-        armature_target = get_target_armature()
-
-        if not armature_source or not armature_source.animation_data or not armature_source.animation_data.action:
-            self.report(
-                {"ERROR"},
-                "No animation found on source armature!\nSelect an armature with animation as source.",
-            )
-            return {"CANCELLED"}
-
-        if not armature_target:
-            self.report({"ERROR"}, "Please select a target armature.")
-            return {"CANCELLED"}
-
-        if armature_source.name == armature_target.name:
-            self.report({"ERROR"}, "Source and target armature are the same!")
-            return {"CANCELLED"}
-
-        retarget_bone_list = _collect_valid_bone_list(context, armature_source, armature_target)
-        if not retarget_bone_list:
-            self.report(
-                {"ERROR"},
-                "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
-            )
-            return {"CANCELLED"}
-
-        root_bones = _find_root_bones(armature_target, retarget_bone_list)
-        if not root_bones:
-            self.report(
-                {"ERROR"},
-                "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
-            )
-            return {"CANCELLED"}
-
-        seen = {}
-        for item in retarget_bone_list:
-            seen[item.bone_name_target] = seen.get(item.bone_name_target, 0) + 1
-        duplicates = [k for k, v in seen.items() if v > 1]
-        if duplicates:
-            self.report(
-                {"ERROR"},
-                f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
-            )
-            return {"CANCELLED"}
-
-        if context.active_object and context.active_object.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-
-        _build_retarget_link(context, armature_source, armature_target, retarget_bone_list, root_bones)
-
-        bpy.ops.object.select_all(action="DESELECT")
-        utils.set_active(armature_target)
-        self.report({"INFO"}, "Live retarget preview linked! Press Play to inspect, then click Bake Animation or Unlink.")
-        return {"FINISHED"}
-
-
-class MOTIVE_OT_unlink_retarget_preview(Operator):
-    """Removes live retargeting preview constraints and cleans up temporary helper objects."""
-
-    bl_idname = "motive.unlink_retarget_preview"
-    bl_label = "Unlink Preview"
-    bl_description = "Remove live retargeting preview constraints and helper rig without baking"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        armature_target = get_target_armature()
-        if not armature_target:
-            self.report({"WARNING"}, "No target armature selected.")
-            return {"CANCELLED"}
-
-        if context.active_object and context.active_object.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-
-        _cleanup_retarget_link(armature_target, reset_pose=True)
-        bpy.ops.object.select_all(action="DESELECT")
-        utils.set_active(armature_target)
-        context.view_layer.update()
-        self.report({"INFO"}, "Retarget preview unlinked and helper rig cleaned up.")
-        return {"FINISHED"}
-
-
 class MOTIVE_OT_retarget_animation(Operator):
-    """Retargets (or bakes an active live preview of) the offline FBX/BVH animation onto the target character."""
+    """Retargets the offline FBX/BVH animation from the source armature to the target character."""
 
     bl_idname = "motive.retarget_animation"
     bl_label = "Retarget Animation"
@@ -781,70 +681,53 @@ class MOTIVE_OT_retarget_animation(Operator):
         if context.active_object and context.active_object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
 
-        was_preview_linked = _is_target_linked(armature_target)
+        # Build retargeting bone list
+        self.retarget_bone_list = _collect_valid_bone_list(context, armature_source, armature_target)
+        if not self.retarget_bone_list:
+            self.report(
+                {"ERROR"},
+                "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
+            )
+            return {"CANCELLED"}
 
-        if was_preview_linked:
-            # Bake directly from active live preview constraints (preserves any live anchor adjustments)
-            target_bones_to_bake = []
-            root_bones = []
-            for pb in armature_target.pose.bones:
-                has_rot = any(RETARGET_ID in c.name and c.type == "COPY_ROTATION" for c in pb.constraints)
-                has_loc = any(RETARGET_ID in c.name and c.type == "COPY_LOCATION" for c in pb.constraints)
-                if has_rot or has_loc:
-                    target_bones_to_bake.append(pb.name)
-                if has_loc:
-                    root_bones.append(pb.name)
-            if not target_bones_to_bake:
-                self.report({"ERROR"}, "No active retarget preview constraints found on target armature.")
-                return {"CANCELLED"}
-        else:
-            # Build retargeting bone list
-            self.retarget_bone_list = _collect_valid_bone_list(context, armature_source, armature_target)
-            if not self.retarget_bone_list:
-                self.report(
-                    {"ERROR"},
-                    "No valid mapped bone pairs found. Check mappings or click Rebuild Bone List.",
-                )
-                return {"CANCELLED"}
+        # Find the root bones
+        root_bones = _find_root_bones(armature_target, self.retarget_bone_list)
+        if not root_bones:
+            self.report(
+                {"ERROR"},
+                "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
+            )
+            return {"CANCELLED"}
 
-            # Find the root bones
-            root_bones = _find_root_bones(armature_target, self.retarget_bone_list)
-            if not root_bones:
-                self.report(
-                    {"ERROR"},
-                    "No root bone found!\nCheck if bones are mapped correctly or try rebuilding the bone list.",
-                )
-                return {"CANCELLED"}
+        # Check for duplicate target bone entries
+        seen = {}
+        for item in self.retarget_bone_list:
+            seen[item.bone_name_target] = seen.get(item.bone_name_target, 0) + 1
+        duplicates = [k for k, v in seen.items() if v > 1]
+        if duplicates:
+            self.report(
+                {"ERROR"},
+                f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
+            )
+            return {"CANCELLED"}
 
-            # Check for duplicate target bone entries
-            seen = {}
-            for item in self.retarget_bone_list:
-                seen[item.bone_name_target] = seen.get(item.bone_name_target, 0) + 1
-            duplicates = [k for k, v in seen.items() if v > 1]
-            if duplicates:
-                self.report(
-                    {"ERROR"},
-                    f"Duplicate target bone entries found: {', '.join(duplicates)}. Use each target bone once.",
-                )
-                return {"CANCELLED"}
-
-            # Save custom schemes if user adjusted mappings
-            custom_schemes_manager.save_retargeting_to_list()
-
-            # Build offset-independent zero-lever-arm link
-            _build_retarget_link(context, armature_source, armature_target, self.retarget_bone_list, root_bones)
-            target_bones_to_bake = [item.bone_name_target for item in self.retarget_bone_list]
+        # Save custom schemes if user adjusted mappings
+        custom_schemes_manager.save_retargeting_to_list()
 
         rotation_mode = armature_target.rotation_mode
+        target_bones_to_bake = [item.bone_name_target for item in self.retarget_bone_list]
 
         try:
+            # Build temporary offset-independent zero-lever-arm helper rig
+            _build_retarget_link(context, armature_source, armature_target, self.retarget_bone_list, root_bones)
+
             # Select ONLY mapped bones on target armature for clean baking
             for pb in armature_target.pose.bones:
                 _select_pose_bone(armature_target, pb.name, False)
             for bname in target_bones_to_bake:
                 _select_pose_bone(armature_target, bname, True)
 
-            # Bake animation driven by live helper constraints
+            # Bake animation driven by temporary helper constraints
             self.bake_animation(armature_source, armature_target, root_bones)
 
             # Rename baked action
